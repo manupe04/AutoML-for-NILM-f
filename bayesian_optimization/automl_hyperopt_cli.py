@@ -12,6 +12,13 @@ print (sys.version)
 
 
 from nilmtk import DataSet
+from nilmtk.appliance import Appliance
+# Busqueda de aparatos por tipo exacto. Con sinonimos (el default), NILMTK
+# trata fridge / fridge freezer / freezer como el mismo aparato: en una casa
+# con heladera y freezer aparte la busqueda es ambigua, y en una con solo un
+# freezer devuelve el freezer como si fuera la heladera. Las etiquetas se
+# unifican antes con models/nilm/normalizar_aparatos.py (repo AMPR).
+Appliance.allow_synonyms = False
 import pandas as pd
 import numpy as np
 
