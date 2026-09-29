@@ -6,7 +6,7 @@ import  argparse
 import time
 import sys, os
 sys.path.append(os.path.abspath('./bayesian_optimization/'))
-from algorithms.CO.CO.codisaggregator import CombinatorialOptimisation
+from algorithms.CO.codisaggregator import CombinatorialOptimisation
 
 
 from nilmtk import DataSet, TimeFrame, MeterGroup, HDFDataStore

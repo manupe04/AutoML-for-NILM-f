@@ -13,7 +13,7 @@ from nilmtk.feature_detectors import cluster
 import sys, os
 #from nilmtk.disaggregate import Disaggregator
 sys.path.append(os.path.abspath('./bayesian_optimization/'))
-from algorithms.DIS.DIS.disaggregator import Disaggregator
+from algorithms.DIS.disaggregator import Disaggregator
 from nilmtk.datastore import HDFDataStore
 
 # Python 2/3 compatibility

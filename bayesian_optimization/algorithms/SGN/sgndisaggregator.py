@@ -1,18 +1,32 @@
 from __future__ import print_function, division
-import sys
-sys.path.append('/content/drive/MyDrive/automl4nilm2')
 
 import numpy as np
 import pandas as pd
 import h5py
-from tensorflow.keras.models import Sequential, load_model
-from tensorflow.keras.layers import Conv1D, Dense, Flatten
-from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.models import Model, load_model
+from tensorflow.keras.layers import Conv1D, Dense, Flatten, Input, Multiply
 from nilmtk.legacy.disaggregate import Disaggregator
 
-class Seq2PointDisaggregator(Disaggregator):
+
+class SGNDisaggregator(Disaggregator):
+    """Subtask Gated Network (Shin et al., 2019).
+
+    Dos subredes paralelas sobre la misma ventana de la senal agregada:
+
+      - Subred de regresion: estima la potencia del electrodomestico.
+      - Subred de clasificacion: estima el estado on/off (salida sigmoide).
+
+    La salida final es el producto de ambas. La subred de clasificacion
+    actua como compuerta (gate): cuando estima que el electrodomestico
+    esta apagado, anula la estimacion de potencia. Eso reduce los errores
+    de estado, que son los que mas afectan la confianza del usuario final.
+
+    La interfaz es identica a la de Seq2PointDisaggregator para que el
+    framework AutoML4NILM pueda usarla sin cambios.
+    """
+
     def __init__(self, patience, optimizer, learning_rate, loss, window_size=99):
-        self.MODEL_NAME = "Seq2Point"
+        self.MODEL_NAME = "SGN"
         self.mmax = None
         self.patience = patience
         self.optimizer = optimizer
@@ -22,16 +36,36 @@ class Seq2PointDisaggregator(Disaggregator):
         self.stopped_epoch = 0
         self.model = self._create_model(self.optimizer, self.learning_rate, self.loss)
 
+    def _conv_stack(self, x, prefix):
+        """Pila convolucional compartida por ambas subredes.
+
+        Replica la arquitectura de Seq2Point para que la comparacion entre
+        modelos aisle el efecto de la compuerta y no el de la profundidad.
+        """
+        x = Conv1D(30, 10, activation="relu", padding="same", name=prefix + "_conv1")(x)
+        x = Conv1D(30, 8, activation="relu", padding="same", name=prefix + "_conv2")(x)
+        x = Conv1D(40, 6, activation="relu", padding="same", name=prefix + "_conv3")(x)
+        x = Conv1D(50, 5, activation="relu", padding="same", name=prefix + "_conv4")(x)
+        x = Conv1D(50, 5, activation="relu", padding="same", name=prefix + "_conv5")(x)
+        x = Flatten(name=prefix + "_flat")(x)
+        x = Dense(1024, activation="relu", name=prefix + "_dense")(x)
+        return x
+
     def _create_model(self, optimizer, learning_rate, loss):
-        model = Sequential()
-        model.add(Conv1D(30, 10, activation="relu", padding="same", input_shape=(self.window_size, 1)))
-        model.add(Conv1D(30, 8, activation="relu", padding="same"))
-        model.add(Conv1D(40, 6, activation="relu", padding="same"))
-        model.add(Conv1D(50, 5, activation="relu", padding="same"))
-        model.add(Conv1D(50, 5, activation="relu", padding="same"))
-        model.add(Flatten())
-        model.add(Dense(1024, activation="relu"))
-        model.add(Dense(1, activation="linear"))
+        inputs = Input(shape=(self.window_size, 1), name="aggregate_input")
+
+        # Subred de regresion: cuanta potencia consume.
+        reg = self._conv_stack(inputs, "reg")
+        power = Dense(1, activation="linear", name="power_output")(reg)
+
+        # Subred de clasificacion: esta encendido o apagado.
+        cls = self._conv_stack(inputs, "cls")
+        state = Dense(1, activation="sigmoid", name="state_output")(cls)
+
+        # Compuerta: la estimacion de potencia se anula si el estado es apagado.
+        gated = Multiply(name="gated_output")([power, state])
+
+        model = Model(inputs=inputs, outputs=gated, name="SGN")
         model.compile(optimizer=optimizer, loss=loss)
         return model
 
@@ -136,6 +170,10 @@ class Seq2PointDisaggregator(Disaggregator):
             )
 
     def import_model(self, filename):
+        # compile=False: Keras 3 no puede deserializar la loss compilada
+        # ('mse') guardada en el formato legacy H5, y load_model() revienta
+        # aunque el modelo en si este intacto. No hace falta recompilar para
+        # disaggregate(), que solo usa model.predict().
         self.model = load_model(filename, compile=False)
         with h5py.File(filename, 'r') as hf:
             self.mmax = np.array(hf.get('disaggregator-data').get('mmax'))[0]

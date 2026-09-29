@@ -65,6 +65,26 @@ def relative_error_total_energy(pred, ground):
         [E_pred, E_ground] = np.sum(chunk_results,axis=0)
         return abs(E_pred - E_ground) / float(max(E_pred,E_ground))
 
+# Signal Aggregate Error (RNF-02). Usa E_ground como denominador, a
+# diferencia de relative_error_total_energy (que usa max(E_pred, E_ground)):
+# es la definicion estandar en NILM (Bonfigli et al., 2017).
+def sae(pred, ground):
+    aligned_meters = align_two_meters(pred, ground)
+    chunk_results = []
+    sum_samples = 0.0
+    for chunk in aligned_meters:
+        chunk.fillna(0, inplace=True)
+        sum_samples += len(chunk)
+        E_pred = sum(chunk.iloc[:,0])
+        E_ground = sum(chunk.iloc[:,1])
+        chunk_results.append([E_pred, E_ground])
+    if sum_samples == 0:
+        return None
+    [E_pred, E_ground] = np.sum(chunk_results, axis=0)
+    if E_ground == 0:
+        return None
+    return abs(E_pred - E_ground) / float(E_ground)
+
 def mean_absolute_error(pred, ground):
     aligned_meters = align_two_meters(pred, ground)
     total_sum = 0.0

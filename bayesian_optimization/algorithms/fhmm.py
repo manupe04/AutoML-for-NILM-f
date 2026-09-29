@@ -12,7 +12,7 @@ import pandas as pd
 import sys, os
 sys.path.append(os.path.abspath('./bayesian_optimization/'))
 
-from algorithms.FHMM.FHMM.fhmmdisaggregator import FHMMExact
+from algorithms.FHMM.fhmmdisaggregator import FHMMExact
 
 import  argparse
 import json

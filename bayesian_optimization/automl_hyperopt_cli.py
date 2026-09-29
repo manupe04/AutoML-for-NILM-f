@@ -37,6 +37,8 @@ from algorithms.fhmm import fhmm
 from algorithms.co import combinatorial_optimisation
 from algorithms.gru import gru
 from algorithms.seq2point import seq2point
+from algorithms.treecnn import treecnn
+from algorithms.sgn import sgn
 from algorithms.seq2seq import seq2seq
 from algorithms.windowgru import window_gru
 from algorithms.lstm import lstm
@@ -249,6 +251,38 @@ def objective(args):
                 window_size=args['window_size']
             )
 
+        elif algorithm == 'sgn':
+            model_result_data = sgn(
+                dataset_path=dataset_path,
+                train_building=train_building, train_start=train_start, train_end=train_end,
+                val_building=val_building, val_start=val_start, val_end=val_end,
+                test_building=test_building, test_start=test_start, test_end=test_end,
+                meter_key=appliance,
+                sample_period=downsampling_period,
+                num_epochs=num_epochs,
+                patience=patience,
+                optimizer=args['optimizer'],
+                learning_rate=args['learning_rate'],
+                loss=args['loss_function'],
+                window_size=args['window_size']
+            )
+
+        elif algorithm == 'treecnn':
+            model_result_data = treecnn(
+                dataset_path=dataset_path,
+                train_building=train_building, train_start=train_start, train_end=train_end,
+                val_building=val_building, val_start=val_start, val_end=val_end,
+                test_building=test_building, test_start=test_start, test_end=test_end,
+                meter_key=appliance,
+                sample_period=downsampling_period,
+                num_epochs=num_epochs,
+                patience=patience,
+                optimizer=args['optimizer'],
+                learning_rate=args['learning_rate'],
+                loss=args['loss_function'],
+                window_size=args['window_size']
+            )
+
         elif algorithm == 'long short-term memory':
             model_result_data = lstm(
                 dataset_path=dataset_path,
@@ -300,7 +334,7 @@ def objective(args):
             'status': STATUS_FAIL,
             'error': str(e)
         }
-        with open('/home/nsiavash/SM-automl/bayesian_optimization/results/trials_temp.json', 'a') as f:
+        with open('results/trials_temp.json', 'a') as f:
             json.dump(results, f)
             f.write(os.linesep)
         return results
@@ -337,7 +371,7 @@ def objective(args):
             'status': STATUS_OK,
             'order': count,
             }
-    with open('/home/nsiavash/SM-automl/bayesian_optimization/results/trials_temp.json', 'a') as f:
+    with open('results/trials_temp.json', 'a') as f:
         json.dump(results, f)
         f.write(os.linesep)
 
@@ -357,8 +391,8 @@ def objective(args):
     #.quniform a continuous uniform distribution over a range
 def optimize_hyperparameters():
         space = {
-            'algorithm': hp.choice('algorithm', ['dae','fully-connected neural networks','gated recurrent units','window gru','seq2seq','seq2point','long short-term memory','decision tree','random forest','combinatorial optimization','factorial hidden markov models']),
-            'datapath': '/home/nsiavash/SM-automl/data/UKDALE/ukdale.h5',
+            'algorithm': hp.choice('algorithm', ['dae','fully-connected neural networks','gated recurrent units','window gru','seq2seq','seq2point','treecnn','sgn','long short-term memory','decision tree','random forest','combinatorial optimization','factorial hidden markov models']),
+            'datapath': '../../data/ukdale.h5',
             'train_building': 1,
             'train_start': '2014-03-13',
             'train_end': '2014-07-21',
@@ -373,7 +407,7 @@ def optimize_hyperparameters():
             'dropout_prob': hp.choice('dropout_prob', [0.1, 0.3]),
             'learning_rate': hp.choice('learning_rate', [0.0001, 0.001]),
             'num_layers': hp.choice('num_layers', [5, 7, 1]),
-            'num_epochs': 20,
+            'num_epochs': 3,
             'patience': 15,
             'criterion': hp.choice('criterion',['squared_error', 'friedman_mse']),
             'n_estimators':hp.choice('n_estimators',[10,30]),
@@ -391,7 +425,7 @@ def optimize_hyperparameters():
             return objective(args)
 
         # best = fmin(fn=objective, space=space, algo=tpe.suggest, max_evals=10, trials=trials)
-        best = fmin(fn=wrapped_objective, space=space, algo=tpe.suggest, max_evals=30, trials=trials)
+        best = fmin(fn=wrapped_objective, space=space, algo=tpe.suggest, max_evals=5, trials=trials)
 
         logger.info(f"Best hyperparameters: {best}")
         return best
@@ -402,7 +436,7 @@ def optimize_hyperparameters():
 def main():
         best_hyperparameters = optimize_hyperparameters()
         choices = {
-            'algorithm': ['dae','fully-connected neural networks','gated recurrent units','window gru','seq2seq','seq2point','long short-term memory','decision tree','random forest','combinatorial optimization','factorial hidden markov models'],
+            'algorithm': ['dae','fully-connected neural networks','gated recurrent units','window gru','seq2seq','seq2point','treecnn','sgn','long short-term memory','decision tree','random forest','combinatorial optimization','factorial hidden markov models'],
             'criterion': ['squared_error', 'friedman_mse'],
             'loss_function': ['mse', 'mae'],
             # 'max_depth': [10, 20, None],

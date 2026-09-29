@@ -1,21 +1,25 @@
 import time
 import sys, os
-import sys
 sys.path.append(os.path.abspath('./bayesian_optimization/'))
-#sys.path.append(os.path.abspath('../bayesian_optimization/'))
-from tensorflow.keras.optimizers import Adam, RMSprop, Nadam
 from nilmtk import DataSet, HDFDataStore
-from algorithms.SEQ2POINT.seq2pointdisaggregator import Seq2PointDisaggregator
+from algorithms.TREECNN.treecnndisaggregator import TreeCNNDisaggregator
 from utils import metrics
-#from seq2pointdisaggregator import Seq2PointDisaggregator
 import argparse
 import json
 import pandas as pd
 
 
-def seq2point(dataset_path, train_building, train_start, train_end, val_building, val_start, val_end,
-              test_building, test_start, test_end, meter_key, sample_period, num_epochs, patience,
-              optimizer, learning_rate, loss, window_size):
+def treecnn(dataset_path, train_building, train_start, train_end, val_building, val_start, val_end,
+            test_building, test_start, test_end, meter_key, sample_period, num_epochs, patience,
+            optimizer, learning_rate, loss, window_size):
+    """Wrapper que integra TreeCNN a AutoML4NILM, con la misma firma que sgn().
+
+    Usa el camino train()/disaggregate() de TreeCNNDisaggregator (un solo
+    electrodomestico por corrida), que es el compatible con este pipeline.
+    El camino train_multi() -- la cascada real de TreeCNN -- queda fuera de
+    la optimizacion bayesiana porque esta entrena varios aparatos a la vez y
+    el framework evalua un aparato por corrida.
+    """
 
     start = time.time()
 
@@ -39,21 +43,21 @@ def seq2point(dataset_path, train_building, train_start, train_end, val_building
     val_mains = val_elec.mains()
     test_mains = test_elec.mains()
 
-    model = Seq2PointDisaggregator(patience=patience,
-                                   optimizer=optimizer,
-                                   learning_rate=learning_rate,
-                                   loss=loss,
-                                   window_size=window_size)
+    model = TreeCNNDisaggregator(patience=patience,
+                                  optimizer=optimizer,
+                                  learning_rate=learning_rate,
+                                  loss=loss,
+                                  window_size=window_size)
 
     model.train(train_mains, train_meter, epochs=num_epochs, sample_period=sample_period)
     num_epochs = model.stopped_epoch if model.stopped_epoch != 0 else num_epochs
 
-    val_disag_filename = 'disag-SEQ2POINT-val.h5'
+    val_disag_filename = 'disag-TreeCNN-val.h5'
     output = HDFDataStore(val_disag_filename, 'w')
     model.disaggregate(val_mains, output, train_meter, sample_period=sample_period)
     output.close()
 
-    test_disag_filename = 'disag-SEQ2POINT-test.h5'
+    test_disag_filename = 'disag-TreeCNN-test.h5'
     output = HDFDataStore(test_disag_filename, 'w')
     model.disaggregate(test_mains, output, train_meter, sample_period=sample_period)
     output.close()
@@ -110,7 +114,7 @@ def seq2point(dataset_path, train_building, train_start, train_end, val_building
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Seq2Point Disaggregator')
+    parser = argparse.ArgumentParser(description='TreeCNN Disaggregator')
     parser.add_argument('--datapath', '-d', type=str, required=True)
 
     parser.add_argument('--train_building', type=int, required=True)
@@ -128,7 +132,7 @@ def main():
     parser.add_argument('--sampling_rate', type=int, required=True)
 
     parser.add_argument('--epochs', type=int, default=50)
-    parser.add_argument('--window_size', type=int, default=99)
+    parser.add_argument('--window_size', type=int, default=128)
 
     parser.add_argument('--learning_rate', type=float, required=True)
     parser.add_argument('--patience', type=int, default=10)
@@ -137,7 +141,7 @@ def main():
 
     args = parser.parse_args()
 
-    model_result_data = seq2point(
+    model_result_data = treecnn(
         dataset_path=args.datapath,
         train_building=args.train_building, train_start=pd.Timestamp(args.train_start) if args.train_start else None, train_end=pd.Timestamp(args.train_end),
         val_building=args.val_building, val_start=pd.Timestamp(args.val_start), val_end=pd.Timestamp(args.val_end),
@@ -147,7 +151,7 @@ def main():
         loss=args.loss, patience=args.patience, window_size=args.window_size
     )
 
-    with open('seq2point_json.json', 'a+') as outfile:
+    with open('treecnn_json.json', 'a+') as outfile:
         json.dump(model_result_data, outfile, sort_keys=True, indent=4, separators=(',', ': '))
     print(model_result_data)
 
