@@ -27,7 +27,6 @@ def fhmm(dataset_path, train_building, train_start, train_end, val_building, val
 
     # Prepare dataset and options
     # print("========== OPEN DATASETS ============")
-    dataset_path = '/home/nsiavash/SM-automl/data/UKDALE/ukdale.h5'
     train = DataSet(dataset_path)
     train.set_window(start=train_start, end=train_end)
     val = DataSet(dataset_path)
@@ -82,6 +81,7 @@ def fhmm(dataset_path, train_building, train_start, train_end, val_building, val
         'mean_squared_error': metrics.mean_square_error(res_elec_val[meter_key], val_elec[meter_key]),
         'relative_error_in_total_energy': metrics.relative_error_total_energy(res_elec_val[meter_key], val_elec[meter_key]),
         'nad': metrics.nad(res_elec_val[meter_key], val_elec[meter_key]),
+        'sae': metrics.sae(res_elec_val[meter_key], val_elec[meter_key]),
         'disaggregation_accuracy': metrics.disaggregation_accuracy(res_elec_val[meter_key], val_elec[meter_key])
         }
     # Test
@@ -98,6 +98,7 @@ def fhmm(dataset_path, train_building, train_start, train_end, val_building, val
         'mean_squared_error': metrics.mean_square_error(res_elec[meter_key], test_elec[meter_key]),
         'relative_error_in_total_energy': metrics.relative_error_total_energy(res_elec[meter_key], test_elec[meter_key]),
         'nad': metrics.nad(res_elec[meter_key], test_elec[meter_key]),
+        'sae': metrics.sae(res_elec[meter_key], test_elec[meter_key]),
         'disaggregation_accuracy': metrics.disaggregation_accuracy(res_elec[meter_key], test_elec[meter_key])
         }
 

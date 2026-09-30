@@ -14,7 +14,7 @@ import pandas as pd
 
 def seq2seq(dataset_path, train_building, train_start, train_end, val_building, val_start, val_end,
             test_building, test_start, test_end, meter_key, sample_period, num_epochs, patience,
-            optimizer, learning_rate, loss, window_size, sequence_length):
+            optimizer, learning_rate, loss, window_size):
 
     # Start tracking time
     start = time.time()
@@ -44,8 +44,7 @@ def seq2seq(dataset_path, train_building, train_start, train_end, val_building, 
                                 optimizer=optimizer,
                                 learning_rate=learning_rate,
                                 loss=loss,
-                                window_size=window_size,
-                                sequence_length=sequence_length)
+                                window_size=window_size)
 
     print("========== TRAIN ============")
     model.train(train_mains, train_meter, epochs=num_epochs, sample_period=sample_period)
@@ -79,6 +78,7 @@ def seq2seq(dataset_path, train_building, train_start, train_end, val_building, 
         'mean_squared_error': metrics.mean_square_error(res_elec_val[meter_key], val_elec[meter_key]),
         'relative_error_in_total_energy': metrics.relative_error_total_energy(res_elec_val[meter_key], val_elec[meter_key]),
         'nad': metrics.nad(res_elec_val[meter_key], val_elec[meter_key]),
+        'sae': metrics.sae(res_elec_val[meter_key], val_elec[meter_key]),
         'disaggregation_accuracy': metrics.disaggregation_accuracy(res_elec_val[meter_key], val_elec[meter_key])
     }
 
@@ -96,6 +96,7 @@ def seq2seq(dataset_path, train_building, train_start, train_end, val_building, 
         'mean_squared_error': metrics.mean_square_error(res_elec[meter_key], test_elec[meter_key]),
         'relative_error_in_total_energy': metrics.relative_error_total_energy(res_elec[meter_key], test_elec[meter_key]),
         'nad': metrics.nad(res_elec[meter_key], test_elec[meter_key]),
+        'sae': metrics.sae(res_elec[meter_key], test_elec[meter_key]),
         'disaggregation_accuracy': metrics.disaggregation_accuracy(res_elec[meter_key], test_elec[meter_key])
     }
 
@@ -139,8 +140,7 @@ def main():
 
     # Model specific options and hyperparameters
     parser.add_argument('--epochs', type=int, default=50)
-    parser.add_argument('--window_size', type=int, default=60)
-    parser.add_argument('--sequence_length', type=int, default=30)
+    parser.add_argument('--window_size', type=int, default=99)
 
     parser.add_argument('--learning_rate', type=float, required=True)
     parser.add_argument('--patience', type=int, default=10)
@@ -168,7 +168,6 @@ def main():
     loss = args.loss
     patience = args.patience
     window_size = args.window_size
-    sequence_length = args.sequence_length
 
     model_result_data = seq2seq(
         dataset_path=hd5_filepath,
@@ -178,7 +177,7 @@ def main():
         meter_key=appliance,
         sample_period=downsampling_period,
         num_epochs=epochs, learning_rate=learning_rate, optimizer=optimizer,
-        loss=loss, patience=patience, window_size=window_size, sequence_length=sequence_length
+        loss=loss, patience=patience, window_size=window_size
     )
 
     # Write options and results to file

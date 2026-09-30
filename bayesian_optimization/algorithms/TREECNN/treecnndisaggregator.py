@@ -8,6 +8,7 @@ from tensorflow.keras.models import Model, load_model
 from tensorflow.keras.layers import (Conv1D, Conv1DTranspose, BatchNormalization,
                                      Input, ReLU)
 from nilmtk.legacy.disaggregate import Disaggregator
+from algorithms.corte_temprano import fit_con_corte
 
 
 def _make_block(window_size, name):
@@ -228,7 +229,7 @@ class TreeCNNDisaggregator(Disaggregator):
             ys.append(Y)
         Y = np.concatenate(ys, axis=-1)
 
-        self.model.fit(X, Y, epochs=epochs, batch_size=batch_size, shuffle=True)
+        self.stopped_epoch = max(self.stopped_epoch, fit_con_corte(self.model, X, Y, epochs, batch_size, self.patience))
 
     # ------------------------------------------------------------------
     # Camino compatible con AutoML4NILM: un solo electrodomestico
@@ -264,7 +265,7 @@ class TreeCNNDisaggregator(Disaggregator):
         X, _ = self._create_windows(mainchunk)
         Y, _ = self._create_windows(meterchunk)
 
-        self.model.fit(X, Y, epochs=epochs, batch_size=batch_size, shuffle=True)
+        self.stopped_epoch = max(self.stopped_epoch, fit_con_corte(self.model, X, Y, epochs, batch_size, self.patience))
 
     def disaggregate_chunk(self, mains):
         mains = mains.fillna(0)

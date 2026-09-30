@@ -7,6 +7,7 @@ import h5py
 from tensorflow.keras.models import load_model, Sequential
 from tensorflow.keras.layers import Dense, Conv1D, GRU, Bidirectional
 from nilmtk.legacy.disaggregate import Disaggregator
+from algorithms.corte_temprano import fit_con_corte
 
 class WindowGRUDisaggregator(Disaggregator):
     def __init__(self, patience, optimizer, learning_rate, loss, window_size=30):
@@ -78,7 +79,7 @@ class WindowGRUDisaggregator(Disaggregator):
         X, idx = self._create_windows(mainchunk, self.window_size)
         Y = np.array(meterchunk)[self.window_size - 1:]
 
-        self.model.fit(X, Y, epochs=epochs, batch_size=batch_size, shuffle=True)
+        self.stopped_epoch = max(self.stopped_epoch, fit_con_corte(self.model, X, Y, epochs, batch_size, self.patience))
 
     def disaggregate_chunk(self, mains):
         mains.fillna(0, inplace=True)

@@ -11,6 +11,7 @@ from tensorflow.keras.models import Sequential
 #from keras.src.models import Sequential
 from tensorflow.keras.layers import Dense, Flatten, Conv1D, Reshape, Dropout
 from nilmtk.legacy.disaggregate import Disaggregator
+from algorithms.corte_temprano import fit_con_corte
 
 
 class DAEDisaggregator(Disaggregator):
@@ -112,7 +113,7 @@ class DAEDisaggregator(Disaggregator):
         X_batch = np.reshape(X_batch, (int(len(X_batch) / s), s, 1))
         Y_batch = np.reshape(Y_batch, (int(len(Y_batch) / s), s, 1))
 
-        self.model.fit(X_batch, Y_batch, batch_size=batch_size, epochs=epochs, shuffle=True)
+        self.stopped_epoch = max(self.stopped_epoch, fit_con_corte(self.model, X_batch, Y_batch, epochs, batch_size, self.patience))
 
     def train_across_buildings(self, mainlist, meterlist, epochs=1, batch_size=128, **load_kwargs):
         assert len(mainlist) == len(meterlist), "Number of main and meter channels should be equal"

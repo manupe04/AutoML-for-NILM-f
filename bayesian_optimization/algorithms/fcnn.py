@@ -191,7 +191,7 @@ def fcnn(dataset_path, train_building, train_start, train_end, val_building, val
                             validation_split=0.2, shuffle=True, callbacks=[earlystop])  # , checkpointer])
 
     # Get number of earlystop epochs
-    num_epochs = earlystop.stopped_epoch if earlystop.stopped_epoch != 0 else num_epochs
+    num_epochs = len(hist_fc_.history['loss'])
 
     # print("========== DISAGGREGATE ============")
     val_pred_fc = fc_model.predict(X_val).reshape(-1)

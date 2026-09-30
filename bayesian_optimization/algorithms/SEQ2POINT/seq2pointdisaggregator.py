@@ -9,6 +9,7 @@ from tensorflow.keras.models import Sequential, load_model
 from tensorflow.keras.layers import Conv1D, Dense, Flatten
 from tensorflow.keras.optimizers import Adam
 from nilmtk.legacy.disaggregate import Disaggregator
+from algorithms.corte_temprano import fit_con_corte
 
 class Seq2PointDisaggregator(Disaggregator):
     def __init__(self, patience, optimizer, learning_rate, loss, window_size=99):
@@ -82,7 +83,7 @@ class Seq2PointDisaggregator(Disaggregator):
         X, idx = self._create_windows(mainchunk)
         Y = np.array(meterchunk)
 
-        self.model.fit(X, Y, epochs=epochs, batch_size=batch_size, shuffle=True)
+        self.stopped_epoch = max(self.stopped_epoch, fit_con_corte(self.model, X, Y, epochs, batch_size, self.patience))
 
     def disaggregate_chunk(self, mains):
         mains.fillna(0, inplace=True)

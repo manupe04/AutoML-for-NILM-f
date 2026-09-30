@@ -11,6 +11,7 @@ from tensorflow.keras.utils import plot_model
 from nilmtk.utils import find_nearest
 from nilmtk.feature_detectors import cluster
 from nilmtk.legacy.disaggregate import Disaggregator
+from algorithms.corte_temprano import fit_con_corte
 from nilmtk.datastore import HDFDataStore
 
 class RNNDisaggregator(Disaggregator):
@@ -93,7 +94,7 @@ class RNNDisaggregator(Disaggregator):
 
         mainchunk = np.reshape(mainchunk, (mainchunk.shape[0],1,1))
 
-        self.model.fit(mainchunk, meterchunk, epochs=epochs, batch_size=batch_size, shuffle=True)
+        self.stopped_epoch = max(self.stopped_epoch, fit_con_corte(self.model, mainchunk, meterchunk, epochs, batch_size, self.patience))
 
     def train_across_buildings(self, mainlist, meterlist, epochs=1, batch_size=128, **load_kwargs):
         '''Train using data from multiple buildings

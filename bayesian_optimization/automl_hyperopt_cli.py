@@ -1,17 +1,38 @@
+"""CLI de AutoML4NILM: entrena y evalua los 13 algoritmos NILM.
+
+Dos modos, siempre con el algoritmo fijo (hyperopt ya no elige el algoritmo):
+
+- barrido:   una corrida por algoritmo con los hiperparametros por defecto.
+- optimizar: optimizacion bayesiana (TPE) de los hiperparametros de cada
+             algoritmo, --max_evals evaluaciones por algoritmo.
+
+Cada corrida (OK o fallida) se agrega como una linea JSON al archivo --salida.
+La metrica a optimizar se calcula sobre la casa de validacion; las metricas de
+la casa de test se guardan para comparar la generalizacion entre casas.
+
+Ejemplo (desde bayesian_optimization/):
+    python automl_hyperopt_cli.py --datapath ../../data/ukdale.h5 \\
+        --appliance "fridge freezer" --sampling_rate 60 \\
+        --train_building 1 --train_start 2014-03-01 --train_end 2014-03-06 \\
+        --val_building 5 --val_start 2014-07-01 --val_end 2014-07-02 \\
+        --test_building 2 --test_start 2013-06-01 --test_end 2013-06-03 \\
+        --epochs 1 --modo barrido --algoritmos seq2point sgn \\
+        --salida results/barrido.jsonl
+"""
 import warnings; warnings.filterwarnings("ignore")
-from hyperopt import fmin, tpe, hp, STATUS_OK, STATUS_FAIL, Trials, space_eval
 import os, sys
-sys.path.append(os.path.abspath('./bayesian_optimization/'))
-import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-# For surpressing print
+import argparse
+import datetime
+import json
+import logging
+import time
+import traceback
 
-print (sys.version)
-#Using HiddenPrints is useful in scenarios where you want to run code that produces a lot of output (like logging or progress messages) but you don't want that output to clutter your console.
+import numpy as np
+from hyperopt import fmin, tpe, hp, STATUS_OK, STATUS_FAIL, Trials, space_eval
 
-
-from nilmtk import DataSet
 from nilmtk.appliance import Appliance
 # Busqueda de aparatos por tipo exacto. Con sinonimos (el default), NILMTK
 # trata fridge / fridge freezer / freezer como el mismo aparato: en una casa
@@ -19,23 +40,11 @@ from nilmtk.appliance import Appliance
 # freezer devuelve el freezer como si fuera la heladera. Las etiquetas se
 # unifican antes con models/nilm/normalizar_aparatos.py (repo AMPR).
 Appliance.allow_synonyms = False
-import pandas as pd
-import numpy as np
 
+import tables
+import tensorflow as tf
 from tensorflow.keras.optimizers import Adam, Nadam, RMSprop
 
-import datetime
-import time
-import math
-import glob
-
-from sklearn.tree import DecisionTreeRegressor
-
-import argparse
-
-import json
-
-# Import algorithms
 from algorithms.randomforest import random_forest
 from algorithms.dt import decision_tree
 from algorithms.dae import dae
@@ -50,427 +59,260 @@ from algorithms.seq2seq import seq2seq
 from algorithms.windowgru import window_gru
 from algorithms.lstm import lstm
 
-from utils import metrics_np
-from utils.metrics_np import Metrics
+logger = logging.getLogger("automl4nilm")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 #######################################################
-################## Function for reversing metrics for minimization
+################## Algoritmos e hiperparametros
 #######################################################
-#metrics_minmax_reverse: Used when working with a collection of metric results (e.g., from model evaluation).
-#metrics_minmax_reverse_print: Used for individual metric values, especially when preparing output for logging or reporting.
-def metrics_minmax_reverse(metric_results, metrics_to_optimize):
-    metric_to_reverse = ['precision_score', 'accuracy_score', 'f1_score', 'disaggregation_accuracy']
-    if metrics_to_optimize in metric_to_reverse:
-        # return negative to maximize a metric instead
-        return -1*metric_results[metrics_to_optimize]
-    else:
-        return metric_results[metrics_to_optimize]
+# Nombre en el CLI -> (funcion, hiperparametros que recibe)
+NN = ['optimizer', 'learning_rate', 'loss']
+ALGORITMOS = {
+    'dae':                             (dae,         NN + ['sequence_length']),
+    'fully-connected neural networks': (fcnn,        NN + ['num_layers', 'dropout_prob']),
+    'gated recurrent units':           (gru,         NN),
+    'window gru':                      (window_gru,  NN + ['window_size']),
+    'seq2seq':                         (seq2seq,     NN + ['window_size']),
+    'seq2point':                       (seq2point,   NN + ['window_size']),
+    'treecnn':                         (treecnn,     NN + ['window_size']),
+    'sgn':                             (sgn,         NN + ['window_size']),
+    'long short-term memory':          (lstm,        NN),
+    'decision tree':                   (decision_tree, ['criterion', 'min_samples_split']),
+    'random forest':                   (random_forest, ['n_estimators', 'criterion', 'min_samples_split']),
+    'combinatorial optimization':      (combinatorial_optimisation, []),
+    'factorial hidden markov models':  (fhmm,        []),
+}
+# Los que entrenan por epocas (reciben num_epochs y patience)
+CON_EPOCAS = {a for a, (_, hps) in ALGORITMOS.items() if 'optimizer' in hps}
+
+# Hiperparametros por defecto (modo barrido)
+DEFAULTS = {
+    'optimizer': 'adam',
+    'learning_rate': 0.001,
+    'loss': 'mse',
+    'window_size': 99,
+    'sequence_length': 50,
+    'num_layers': 5,
+    'dropout_prob': 0.1,
+    'criterion': 'squared_error',
+    'min_samples_split': 10,
+    'n_estimators': 30,
+}
+# Ventana por defecto especifica de cada algoritmo (la de 99 es la de seq2point)
+DEFAULTS_POR_ALGORITMO = {
+    'window gru': {'window_size': 50},
+}
+
+# Espacio de busqueda (modo optimizar)
+ESPACIO = {
+    'optimizer': hp.choice('optimizer', ['adam', 'nadam', 'rmsprop']),
+    'learning_rate': hp.choice('learning_rate', [0.0001, 0.0003, 0.001, 0.003]),
+    'loss': hp.choice('loss', ['mse', 'mae']),
+    'window_size': hp.choice('window_size', [49, 99, 199, 299]),
+    'sequence_length': hp.choice('sequence_length', [20, 50, 100]),
+    'num_layers': hp.choice('num_layers', [3, 5, 7]),
+    'dropout_prob': hp.choice('dropout_prob', [0.1, 0.3, 0.5]),
+    'criterion': hp.choice('criterion', ['squared_error', 'friedman_mse']),
+    'min_samples_split': hp.choice('min_samples_split', [2, 10, 20, 50]),
+    'n_estimators': hp.choice('n_estimators', [10, 30, 50, 100]),
+}
+ESPACIO_POR_ALGORITMO = {
+    'window gru': {'window_size': hp.choice('window_size', [20, 50, 100])},
+}
+
+OPTIMIZADORES = {'adam': Adam, 'nadam': Nadam, 'rmsprop': RMSprop}
+
+# Metricas a maximizar (hyperopt minimiza: se invierten)
+A_MAXIMIZAR = {'precision_score', 'recall_score', 'accuracy_score', 'f1_score', 'disaggregation_accuracy'}
 
 
-#The function metrics_minmax_reverse_print is designed to adjust the output of specific performance metrics based on whether they need to be maximized or not.
-def metrics_minmax_reverse_print(metric, metrics_to_optimize):
-    metric_to_reverse = ['precision_score', 'accuracy_score', 'f1_score', 'disaggregation_accuracy']
-    if metrics_to_optimize in metric_to_reverse:
-        # return negative to maximize a metric instead
-        return -1*metric
-    else:
-        return metric
-
-#######################################################
-################## Global Variables
-#######################################################
-count = 0
-best = 0
-
-hd5_filepath = None
-
-train_building = None
-train_start = None
-train_end = None
-
-val_building = None
-val_start = None
-val_end = None
-
-test_building = None
-test_start = None
-test_end = None
-appliance = None
-downsampling_period = None
-
-metrics_to_optimize = None
-num_epochs = None
-patience = None
-
-#######################################################
-################## Main objective function for hyperopt
-#######################################################
-def to_serializable(obj):
-    if isinstance(obj, (np.float32, np.float64)):
-        return float(obj)
-    if isinstance(obj, (np.int32, np.int64)):
+def a_serializable(obj):
+    if isinstance(obj, np.integer):
         return int(obj)
+    if isinstance(obj, np.floating):
+        return float(obj)
     if isinstance(obj, np.ndarray):
         return obj.tolist()
-    return obj
-
-import logging
-logger = logging.getLogger()
-logging.basicConfig(level=logging.INFO)
-
-# Objective Function
-def objective(args):
-    global best, count, num_epochs, patience, metrics_to_optimize
-    count += 1
-    algorithm = args['algorithm']
-    args['type'] = algorithm
+    return str(obj)
 
 
-    #algorithm = args['type']
+def cerrar_hdf_abiertos():
+    """Cierra los HDF5 que un algoritmo fallido dejo abiertos.
 
+    Varios algoritmos comparten el nombre del archivo de desagregacion
+    (p. ej. disag-out-val.h5): si uno falla con el archivo abierto, el
+    siguiente no puede abrirlo en modo 'w'. Solo se cierran esos: NILMTK
+    tiene sus propios HDF5 temporales abiertos y cerrarlos rompe las
+    corridas siguientes.
+    """
+    for h in list(tables.file._open_files.handlers):
+        if os.path.basename(h.filename).startswith('disag-'):
+            h.close()
+
+
+#######################################################
+################## Una corrida
+#######################################################
+def entrenar(algoritmo, hparams, cfg):
+    """Entrena y evalua un algoritmo. Devuelve el registro para --salida."""
+    funcion, _ = ALGORITMOS[algoritmo]
+    kwargs = dict(
+        dataset_path=cfg.datapath,
+        train_building=cfg.train_building, train_start=cfg.train_start, train_end=cfg.train_end,
+        val_building=cfg.val_building, val_start=cfg.val_start, val_end=cfg.val_end,
+        test_building=cfg.test_building, test_start=cfg.test_start, test_end=cfg.test_end,
+        meter_key=cfg.appliance,
+        sample_period=cfg.sampling_rate,
+    )
+    for k, v in hparams.items():
+        if k == 'optimizer':
+            # Instancia con el learning rate: pasando el nombre ('adam'),
+            # Keras usa su learning rate por defecto e ignora el elegido.
+            v = OPTIMIZADORES[v](learning_rate=hparams['learning_rate'])
+        kwargs[k] = v
+    if algoritmo in CON_EPOCAS:
+        kwargs['num_epochs'] = cfg.epochs
+        kwargs['patience'] = cfg.patience
+
+    registro = {
+        'fecha': datetime.datetime.now().isoformat(timespec='seconds'),
+        'modo': cfg.modo,
+        'algorithm': algoritmo,
+        'hparams': hparams,
+        'datapath': os.path.basename(cfg.datapath),
+        'appliance': cfg.appliance,
+        'sampling_rate': cfg.sampling_rate,
+        'train': [cfg.train_building, cfg.train_start, cfg.train_end],
+        'val': [cfg.val_building, cfg.val_start, cfg.val_end],
+        'test': [cfg.test_building, cfg.test_start, cfg.test_end],
+        'max_epochs': cfg.epochs if algoritmo in CON_EPOCAS else None,
+        'seed': cfg.seed,
+    }
+    if cfg.seed is not None:
+        tf.keras.utils.set_random_seed(cfg.seed)
+
+    inicio = time.time()
     try:
-        algorithm = args['algorithm']
-        logger.info(f"Running optimization for algorithm: {algorithm}")
-
-        dataset_path = args['datapath']
-        train_building = args['train_building']
-        train_start = args['train_start']
-        train_end = args['train_end']
-        val_building = args['val_building']
-        val_start = args['val_start']
-        val_end = args['val_end']
-        test_building = args['test_building']
-        test_start = args['test_start']
-        test_end = args['test_end']
-        appliance = args['appliance']
-        patience = args['patience']
-        num_epochs = args['num_epochs']
-        downsampling_period = args['sampling_rate']
-
-        if algorithm == 'dae':
-            model_result_data = dae(
-                dataset_path=dataset_path,
-                train_building=train_building, train_start=train_start, train_end=train_end,
-                val_building=val_building, val_start=val_start, val_end=val_end,
-                test_building=test_building, test_start=test_start, test_end=test_end,
-                meter_key=appliance,
-                sample_period=downsampling_period,
-                optimizer=args['optimizer'],
-                learning_rate=args['learning_rate'],
-                loss=args['loss_function'],
-                patience=patience,
-                num_epochs=num_epochs,
-                sequence_length=args['sequence_length']
-            )
-        elif algorithm == 'fully-connected neural networks':
-            model_result_data = fcnn(
-                dataset_path=dataset_path,
-                train_building=train_building, train_start=train_start, train_end=train_end,
-                val_building=val_building, val_start=val_start, val_end=val_end,
-                test_building=test_building, test_start=test_start, test_end=test_end,
-                meter_key=appliance,
-                sample_period=downsampling_period,
-                num_epochs=num_epochs,
-                patience=patience,
-                num_layers=int(args['num_layers']),
-                optimizer=args['optimizer'],
-                learning_rate=args['learning_rate'],
-                dropout_prob=args['dropout_prob'],
-                loss=args['loss_function']
-            )
-        elif algorithm == 'combinatorial optimization':
-            model_result_data = combinatorial_optimisation(
-                dataset_path=hd5_filepath,
-                train_building=train_building, train_start=train_start, train_end=train_end,
-                val_building=val_building, val_start=val_start, val_end=val_end,
-                test_building=test_building, test_start=test_start, test_end=test_end,
-                meter_key=appliance,
-                sample_period=downsampling_period)
-
-        elif algorithm == 'factorial hidden markov models':
-            model_result_data = fhmm(
-                dataset_path=hd5_filepath,
-                train_building=train_building, train_start=train_start, train_end=train_end,
-                val_building=val_building, val_start=val_start, val_end=val_end,
-                test_building=test_building, test_start=test_start, test_end=test_end,
-                meter_key=appliance,
-                sample_period=downsampling_period)
-
-        elif algorithm == 'gated recurrent units':
-            model_result_data = gru(
-                dataset_path=dataset_path,
-                train_building=train_building, train_start=train_start, train_end=train_end,
-                val_building=val_building, val_start=val_start, val_end=val_end,
-                test_building=test_building, test_start=test_start, test_end=test_end,
-                meter_key=appliance,
-                sample_period=downsampling_period,
-                num_epochs=num_epochs,
-                patience=patience,
-                optimizer=args['optimizer'],
-                learning_rate=args['learning_rate'],
-                loss=args['loss_function']
-            )
-        elif algorithm == 'window gru':
-            model_result_data = window_gru(
-                dataset_path=dataset_path,
-                train_building=train_building, train_start=train_start, train_end=train_end,
-                val_building=val_building, val_start=val_start, val_end=val_end,
-                test_building=test_building, test_start=test_start, test_end=test_end,
-                meter_key=appliance,
-                sample_period=downsampling_period,
-                num_epochs=num_epochs,
-                patience=patience,
-                optimizer=args['optimizer'],
-                learning_rate=args['learning_rate'],
-                loss=args['loss_function'],
-                window_size=args['window_size']
-            )
-        elif algorithm == 'seq2seq':
-            model_result_data = seq2seq(
-                dataset_path=dataset_path,
-                train_building=train_building, train_start=train_start, train_end=train_end,
-                val_building=val_building, val_start=val_start, val_end=val_end,
-                test_building=test_building, test_start=test_start, test_end=test_end,
-                meter_key=appliance,
-                sample_period=downsampling_period,
-                num_epochs=num_epochs,
-                patience=patience,
-                optimizer=args['optimizer'],
-                learning_rate=args['learning_rate'],
-                loss=args['loss_function'],
-                window_size=args['window_size'],
-                sequence_length=args['sequence_length']
-            )
-
-        elif algorithm == 'seq2point':
-            model_result_data = seq2point(
-                dataset_path=dataset_path,
-                train_building=train_building, train_start=train_start, train_end=train_end,
-                val_building=val_building, val_start=val_start, val_end=val_end,
-                test_building=test_building, test_start=test_start, test_end=test_end,
-                meter_key=appliance,
-                sample_period=downsampling_period,
-                num_epochs=num_epochs,
-                patience=patience,
-                optimizer=args['optimizer'],
-                learning_rate=args['learning_rate'],
-                loss=args['loss_function'],
-                window_size=args['window_size']
-            )
-
-        elif algorithm == 'sgn':
-            model_result_data = sgn(
-                dataset_path=dataset_path,
-                train_building=train_building, train_start=train_start, train_end=train_end,
-                val_building=val_building, val_start=val_start, val_end=val_end,
-                test_building=test_building, test_start=test_start, test_end=test_end,
-                meter_key=appliance,
-                sample_period=downsampling_period,
-                num_epochs=num_epochs,
-                patience=patience,
-                optimizer=args['optimizer'],
-                learning_rate=args['learning_rate'],
-                loss=args['loss_function'],
-                window_size=args['window_size']
-            )
-
-        elif algorithm == 'treecnn':
-            model_result_data = treecnn(
-                dataset_path=dataset_path,
-                train_building=train_building, train_start=train_start, train_end=train_end,
-                val_building=val_building, val_start=val_start, val_end=val_end,
-                test_building=test_building, test_start=test_start, test_end=test_end,
-                meter_key=appliance,
-                sample_period=downsampling_period,
-                num_epochs=num_epochs,
-                patience=patience,
-                optimizer=args['optimizer'],
-                learning_rate=args['learning_rate'],
-                loss=args['loss_function'],
-                window_size=args['window_size']
-            )
-
-        elif algorithm == 'long short-term memory':
-            model_result_data = lstm(
-                dataset_path=dataset_path,
-                train_building=train_building, train_start=train_start, train_end=train_end,
-                val_building=val_building, val_start=val_start, val_end=val_end,
-                test_building=test_building, test_start=test_start, test_end=test_end,
-                meter_key=appliance,
-                sample_period=downsampling_period,
-                num_epochs=num_epochs,
-                patience=patience,
-                optimizer=args['optimizer'],
-                learning_rate=args['learning_rate'],
-                loss=args['loss_function']
-            )
-        elif algorithm == 'decision tree':
-            model_result_data = decision_tree(
-                dataset_path=dataset_path,
-                train_building=train_building, train_start=train_start, train_end=train_end,
-                val_building=val_building, val_start=val_start, val_end=val_end,
-                test_building=test_building, test_start=test_start, test_end=test_end,
-                meter_key=appliance,
-                sample_period=downsampling_period,
-                criterion=args['criterion'],
-                min_samples_split=args['min_samples_split']
-            )
-        elif algorithm == 'random forest':
-            model_result_data = random_forest(
-                dataset_path=dataset_path,
-                train_building=train_building, train_start=train_start, train_end=train_end,
-                val_building=val_building, val_start=val_start, val_end=val_end,
-                test_building=test_building, test_start=test_start, test_end=test_end,
-                meter_key=appliance,
-                sample_period=downsampling_period,
-                n_estimators=args['n_estimators'],
-                criterion=args['criterion'],
-                min_samples_split=args['min_samples_split']
-            )
-
-
+        r = funcion(**kwargs)
     except Exception as e:
-        import traceback
-        traceback.print_exc()  # This prints the full error stack trace
+        traceback.print_exc()
+        cerrar_hdf_abiertos()
+        registro.update(status=STATUS_FAIL, error=f"{type(e).__name__}: {e}",
+                        time_taken=round(time.time() - inicio, 2))
+    else:
+        registro.update(status=STATUS_OK,
+                        val_metrics=r['val_metrics'],
+                        test_metrics=r['test_metrics'],
+                        epochs=r['epochs'],
+                        time_taken=round(time.time() - inicio, 2))
+    finally:
+        tf.keras.backend.clear_session()
 
-        if 'optimizer' in args:
-            args['optimizer'] = str(args['optimizer'])
+    with open(cfg.salida, 'a') as f:
+        f.write(json.dumps(registro, default=a_serializable) + '\n')
+    return registro
 
-        results = {
-            'args': args,
-            'status': STATUS_FAIL,
-            'error': str(e)
-        }
-        with open('results/trials_temp.json', 'a') as f:
-            json.dump(results, f)
-            f.write(os.linesep)
-        return results
 
-    # Convert keras optimizer type to String
-    if 'optimizer' in args:
-        args['optimizer'] = args['optimizer']
+def valor_a_minimizar(registro, metrica):
+    v = float(registro['val_metrics'][metrica])
+    return -v if metrica in A_MAXIMIZAR else v
 
-    # Extract info from model_result_data
-    metrics = model_result_data['val_metrics'] # result of validation
-    test_metrics = model_result_data['test_metrics']
-    time_taken = model_result_data['time_taken']
-    epochs = model_result_data['epochs']
-    metrics_to_optimize = 'mean_absolute_error'
 
-    # Print progress - Reguarly
-    print ('iters:', count, ', ',metrics_to_optimize,':', metrics[metrics_to_optimize], 'using', args['type'])
+#######################################################
+################## Modos
+#######################################################
+def hparams_por_defecto(algoritmo):
+    _, nombres = ALGORITMOS[algoritmo]
+    base = {**DEFAULTS, **DEFAULTS_POR_ALGORITMO.get(algoritmo, {})}
+    return {k: base[k] for k in nombres}
 
-    if count == 1:
-        print('new best:', metrics[metrics_to_optimize], 'using', args['type'])
-        best = metrics_minmax_reverse(metrics, metrics_to_optimize)
-    elif metrics_minmax_reverse(metrics, metrics_to_optimize) < best:
-        print ('new best:', metrics[metrics_to_optimize], 'using', args['type'])
-        best = metrics_minmax_reverse(metrics, metrics_to_optimize)
 
-    # Write trial result to file
-    results = {
-            'args': args,
-            'loss': metrics[metrics_to_optimize], # return normall loss without need to inverse for maximizing
-            'metrics': metrics,
-            'test_metrics': test_metrics,
-            'time_taken': time_taken,
-            'epochs': epochs,
-            'status': STATUS_OK,
-            'order': count,
-            }
-    with open('results/trials_temp.json', 'a') as f:
-        json.dump(results, f)
-        f.write(os.linesep)
+def barrido(cfg):
+    for algoritmo in cfg.algoritmos:
+        hparams = hparams_por_defecto(algoritmo)
+        logger.info(f"[barrido] {algoritmo} {hparams}")
+        r = entrenar(algoritmo, hparams, cfg)
+        if r['status'] == STATUS_OK:
+            logger.info(f"[barrido] {algoritmo}: {cfg.metrica} val={r['val_metrics'][cfg.metrica]:.4f} "
+                        f"test={r['test_metrics'][cfg.metrica]:.4f} ({r['time_taken']} s)")
+        else:
+            logger.error(f"[barrido] {algoritmo} FALLO: {r['error']}")
 
-    return {
-            'args': args,
-            'loss': metrics_minmax_reverse(metrics, metrics_to_optimize), # Need to inverse for maximizing for fmin()
-            'metrics': metrics,
-            'test_metrics': test_metrics,
-            'time_taken': time_taken,
-            'epochs': epochs,
-            'status': STATUS_OK,
-            'order': count,
-            }
 
-    # Search space
-    #.choice discrete options.
-    #.quniform a continuous uniform distribution over a range
-def optimize_hyperparameters():
-        space = {
-            'algorithm': hp.choice('algorithm', ['dae','fully-connected neural networks','gated recurrent units','window gru','seq2seq','seq2point','treecnn','sgn','long short-term memory','decision tree','random forest','combinatorial optimization','factorial hidden markov models']),
-            'datapath': '../../data/ukdale.h5',
-            'train_building': 1,
-            'train_start': '2014-03-13',
-            'train_end': '2014-07-21',
-            'val_building': 1,
-            'val_start': '2014-07-22',
-            'val_end': '2014-07-30',
-            'test_building': 1,
-            'test_start': '2015-04-16',
-            'test_end': '2015-05-15',
-            'appliance': 'microwave',
-            'sampling_rate': 60,
-            'dropout_prob': hp.choice('dropout_prob', [0.1, 0.3]),
-            'learning_rate': hp.choice('learning_rate', [0.0001, 0.001]),
-            'num_layers': hp.choice('num_layers', [5, 7, 1]),
-            'num_epochs': 3,
-            'patience': 15,
-            'criterion': hp.choice('criterion',['squared_error', 'friedman_mse']),
-            'n_estimators':hp.choice('n_estimators',[10,30]),
-            'window_size': hp.choice('window_size', [20, 50, 100]),
-            'sequence_length': hp.choice('sequence_length', [10, 20, 50]),
-            'min_samples_split': hp.choice('min_samples_split',[10,20]),
-            'optimizer': hp.choice('optimizer', ['adam', 'nadam']),
-            #'optimizer': hp.choice('optimizer', [ Adam, Nadam]),
-            'loss_function': hp.choice('loss_function', ['mse', 'mae']),
-        }
+def optimizar(cfg):
+    for algoritmo in cfg.algoritmos:
+        _, nombres = ALGORITMOS[algoritmo]
+        if not nombres:
+            # CO y FHMM no tienen hiperparametros: una corrida alcanza
+            logger.info(f"[optimizar] {algoritmo} sin hiperparametros: una sola corrida")
+            entrenar(algoritmo, {}, cfg)
+            continue
+
+        base = {**ESPACIO, **ESPACIO_POR_ALGORITMO.get(algoritmo, {})}
+        espacio = {k: base[k] for k in nombres}
+
+        def objetivo(hparams):
+            hparams = {k: a_serializable(v) if isinstance(v, np.generic) else v for k, v in hparams.items()}
+            r = entrenar(algoritmo, hparams, cfg)
+            if r['status'] != STATUS_OK:
+                return {'status': STATUS_FAIL}
+            logger.info(f"[optimizar] {algoritmo} {hparams}: {cfg.metrica} val={r['val_metrics'][cfg.metrica]:.4f}")
+            return {'status': STATUS_OK, 'loss': valor_a_minimizar(r, cfg.metrica)}
 
         trials = Trials()
+        rstate = np.random.default_rng(cfg.seed) if cfg.seed is not None else None
+        try:
+            mejor = fmin(fn=objetivo, space=espacio, algo=tpe.suggest,
+                         max_evals=cfg.max_evals, trials=trials, rstate=rstate,
+                         # La barra de tqdm reemplaza stdout y rompe la de Keras
+                         show_progressbar=False)
+            logger.info(f"[optimizar] {algoritmo} mejor: {space_eval(espacio, mejor)}")
+        except Exception as e:
+            # fmin falla si todas las evaluaciones fallaron: seguir con el proximo
+            logger.error(f"[optimizar] {algoritmo} sin evaluaciones validas: {e}")
 
-        def wrapped_objective(args):
-            return objective(args)
 
-        # best = fmin(fn=objective, space=space, algo=tpe.suggest, max_evals=10, trials=trials)
-        best = fmin(fn=wrapped_objective, space=space, algo=tpe.suggest, max_evals=5, trials=trials)
+#######################################################
+################## CLI
+#######################################################
+def parse_args(argv=None):
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument('--datapath', required=True, help='Dataset NILMTK (.h5) ya normalizado')
+    p.add_argument('--appliance', required=True, help='Tipo exacto de NILMTK, p. ej. "fridge freezer"')
+    p.add_argument('--sampling_rate', type=int, default=60, help='Segundos (default 60)')
+    for parte in ('train', 'val', 'test'):
+        p.add_argument(f'--{parte}_building', type=int, required=True)
+        p.add_argument(f'--{parte}_start', required=True)
+        p.add_argument(f'--{parte}_end', required=True)
+    p.add_argument('--epochs', type=int, default=10)
+    p.add_argument('--patience', type=int, default=5)
+    p.add_argument('--algoritmos', nargs='+', default=['todos'],
+                   help='Nombres del CLI (entre comillas si tienen espacios) o "todos"')
+    p.add_argument('--modo', choices=['barrido', 'optimizar'], default='barrido')
+    p.add_argument('--max_evals', type=int, default=10, help='Evaluaciones por algoritmo (modo optimizar)')
+    p.add_argument('--metrica', default='mean_absolute_error', help='Metrica de validacion a optimizar')
+    p.add_argument('--seed', type=int, default=42,
+                   help='Semilla de Python, numpy y TF (y de hyperopt). Default 42')
+    p.add_argument('--salida', default='results/trials.jsonl', help='JSONL donde se agrega cada corrida')
+    cfg = p.parse_args(argv)
 
-        logger.info(f"Best hyperparameters: {best}")
-        return best
+    if cfg.algoritmos == ['todos']:
+        cfg.algoritmos = list(ALGORITMOS)
+    desconocidos = [a for a in cfg.algoritmos if a not in ALGORITMOS]
+    if desconocidos:
+        p.error(f"algoritmos desconocidos: {desconocidos}. Validos: {list(ALGORITMOS)}")
+    if cfg.test_building == cfg.train_building:
+        logger.warning("La casa de test es la de train: no mide generalizacion entre casas")
+    os.makedirs(os.path.dirname(os.path.abspath(cfg.salida)), exist_ok=True)
+    return cfg
 
-    #######################################################
-    ###### Start to Optimize
-    #######################################################
-def main():
-        best_hyperparameters = optimize_hyperparameters()
-        choices = {
-            'algorithm': ['dae','fully-connected neural networks','gated recurrent units','window gru','seq2seq','seq2point','treecnn','sgn','long short-term memory','decision tree','random forest','combinatorial optimization','factorial hidden markov models'],
-            'criterion': ['squared_error', 'friedman_mse'],
-            'loss_function': ['mse', 'mae'],
-            # 'max_depth': [10, 20, None],
-            'num_layers': [5, 6, 7],
-            'learning_rate': [0.0001, 0.01],
-            'dropout_prob': [0.1, 0.6],
-             'min_samples_split': [10,20],
-             'n_estimators': [30,50],
-            'optimizer': ['adam', 'nadam'],
-            'window_size': [20, 50, 100],
-            'sequence_length': [10, 20, 50],
-        }
 
-        # decoded = {key: choices[key][value] if key in choices else value for key, value in best_hyperparameters.items()}
-        decoded = {}
-        for key, value in best_hyperparameters.items():
-            if key in choices:
-                decoded[key] = choices[key][int(value)]
-            elif isinstance(value, (np.integer,)):
-                decoded[key] = int(value)
-            elif isinstance(value, (np.floating,)):
-                decoded[key] = float(value)
-            else:
-                decoded[key] = value
+def main(argv=None):
+    cfg = parse_args(argv)
+    logger.info(f"Python {sys.version.split()[0]}, TF {tf.__version__}, GPUs: {tf.config.list_physical_devices('GPU')}")
+    logger.info(f"Modo {cfg.modo}: {len(cfg.algoritmos)} algoritmos -> {cfg.salida}")
+    (barrido if cfg.modo == 'barrido' else optimizar)(cfg)
 
-        logger.info(f"Best Hyperparameters (decoded): {decoded}")
 
 if __name__ == "__main__":
-        main()
-
+    main()

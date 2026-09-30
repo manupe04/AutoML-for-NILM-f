@@ -15,6 +15,14 @@ def relative_error_in_total_energy(output, target):
 def nad(output, target):
     return np.sqrt(np.sum(np.abs(output-target))/np.sum(np.abs(target)))
 
+# Signal Aggregate Error (RNF-02): |E_pred - E_ground| / E_ground, la misma
+# definicion que utils/metrics.py:sae para los algoritmos basados en NILMTK.
+def sae(output, target):
+    sum_target = np.sum(target)
+    if sum_target == 0:
+        return float('nan')  # compute_metrics convierte a float: None rompe
+    return float(np.abs(np.sum(output) - sum_target) / sum_target)
+
 # Lungu's Disaggregation Accuracy for Appliance
 def disaggregation_accuracy(prediction, test_data):
     test = test_data[0:len(prediction)]
@@ -35,6 +43,7 @@ METRICS = {
         metrics.mean_squared_error,
         relative_error_in_total_energy,
         nad,
+        sae,
         disaggregation_accuracy
     ]
 }

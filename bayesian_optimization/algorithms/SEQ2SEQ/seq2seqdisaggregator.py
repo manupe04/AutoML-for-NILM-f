@@ -1,41 +1,55 @@
+"""Sequence-to-sequence (Zhang et al., 2018, "Sequence-to-point learning with
+neural networks for non-intrusive load monitoring", AAAI).
+
+Cada ventana de W muestras del agregado predice la ventana completa de W
+muestras del aparato (seq2point predice solo el punto central). La red es la
+misma CNN del paper para ambos: 5 convoluciones, una densa de 1024 y la salida.
+
+En inferencia las ventanas se deslizan de a una muestra, asi que cada instante
+queda cubierto por hasta W predicciones: la salida es su promedio.
+
+La version anterior de este archivo era una copia de WindowGRU (misma red,
+una sola salida): daba resultados identicos a window gru.
+"""
 from __future__ import print_function, division
-import random
-import sys
+
+import numpy as np
 import pandas as pd
-import numpy as np
 import h5py
+from numpy.lib.stride_tricks import sliding_window_view
+from tensorflow.keras.models import Sequential, load_model
+from tensorflow.keras.layers import Input, Conv1D, Dense, Flatten
 from nilmtk.legacy.disaggregate import Disaggregator
-import numpy as np
-import tensorflow as tf
-from tensorflow.keras.models import Model, Sequential, load_model
-from tensorflow.keras.layers import Input, GRU, Dense, Conv1D, Bidirectional
-from tensorflow.keras.optimizers import Adam
-from nilmtk.legacy.disaggregate import Disaggregator
+from algorithms.corte_temprano import fit_con_corte
 
 
 class Seq2SeqDisaggregator(Disaggregator):
-    def __init__(self, patience, optimizer,sequence_length, learning_rate, loss, window_size=30, hidden_units=64):
+    def __init__(self, patience, optimizer, learning_rate, loss, window_size=99):
         self.MODEL_NAME = "Seq2Seq"
         self.mmax = None
         self.patience = patience
         self.optimizer = optimizer
         self.learning_rate = learning_rate
-        self.MIN_CHUNK_LENGTH = sequence_length
         self.loss = loss
         self.window_size = window_size
-        self.hidden_units = hidden_units
+        self.MIN_CHUNK_LENGTH = 100
         self.stopped_epoch = 0
         self.model = self._create_model(self.optimizer, self.learning_rate, self.loss)
 
     def _create_model(self, optimizer, learning_rate, loss):
-        model = Sequential()
-        model.add(Conv1D(16, 4, activation="relu", padding="same", strides=1, input_shape=(self.window_size, 1)))
-        model.add(Conv1D(8, 4, activation="relu", padding="same", strides=1))
-        model.add(Bidirectional(GRU(self.hidden_units, return_sequences=True), merge_mode='concat'))
-        model.add(Bidirectional(GRU(self.hidden_units * 2, return_sequences=False), merge_mode='concat'))
-        model.add(Dense(64, activation='relu'))
-        model.add(Dense(1, activation='linear'))
-        model.compile(loss=loss, optimizer=optimizer)
+        w = self.window_size
+        model = Sequential([
+            Input(shape=(w, 1)),
+            Conv1D(30, 10, activation='relu', padding='same'),
+            Conv1D(30, 8, activation='relu', padding='same'),
+            Conv1D(40, 6, activation='relu', padding='same'),
+            Conv1D(50, 5, activation='relu', padding='same'),
+            Conv1D(50, 5, activation='relu', padding='same'),
+            Flatten(),
+            Dense(1024, activation='relu'),
+            Dense(w, activation='linear'),
+        ])
+        model.compile(optimizer=optimizer, loss=loss)
         return model
 
     def _normalize(self, chunk, mmax):
@@ -44,13 +58,15 @@ class Seq2SeqDisaggregator(Disaggregator):
     def _denormalize(self, chunk, mmax):
         return chunk * mmax
 
-    def _create_windows(self, series, window_size):
-        values = np.array(series).reshape(-1, 1)
-        X, index = [], []
-        for i in range(len(values) - window_size + 1):
-            X.append(values[i:i + window_size])
-            index.append(series.index[i + window_size - 1])
-        return np.array(X), pd.Index(index)
+    def _windows(self, values):
+        """Ventanas de W muestras con paso 1 (n - W + 1 ventanas).
+
+        Si la serie es mas corta que W se completa con ceros al final.
+        """
+        values = np.asarray(values, dtype='float32')
+        if len(values) < self.window_size:
+            values = np.pad(values, (0, self.window_size - len(values)))
+        return sliding_window_view(values, self.window_size)
 
     def train(self, mains, meter, epochs=1, batch_size=128, **load_kwargs):
         main_series = mains.power_series(**load_kwargs)
@@ -69,30 +85,37 @@ class Seq2SeqDisaggregator(Disaggregator):
             try:
                 mainchunk = next(main_series)
                 meterchunk = next(meter_series)
-            except:
+            except StopIteration:
                 run = False
 
     def train_on_chunk(self, mainchunk, meterchunk, epochs, batch_size):
-        mainchunk.fillna(0, inplace=True)
-        meterchunk.fillna(0, inplace=True)
+        mainchunk = mainchunk.fillna(0)
+        meterchunk = meterchunk.fillna(0)
 
         ix = mainchunk.index.intersection(meterchunk.index)
-        mainchunk = mainchunk[ix]
-        meterchunk = meterchunk[ix]
+        X = self._windows(mainchunk[ix])[..., np.newaxis]
+        Y = self._windows(meterchunk[ix])
 
-        X, idx = self._create_windows(mainchunk, self.window_size)
-        Y = np.array(meterchunk)[self.window_size - 1:]
-
-        self.model.fit(X, Y, epochs=epochs, batch_size=batch_size, shuffle=True)
+        self.stopped_epoch = max(self.stopped_epoch, fit_con_corte(self.model, X, Y, epochs, batch_size, self.patience))
 
     def disaggregate_chunk(self, mains):
-        mains.fillna(0, inplace=True)
-        X, index = self._create_windows(self._normalize(mains, self.mmax), self.window_size)
+        mains = mains.fillna(0)
+        n = len(mains)
+        w = self.window_size
+        X = self._windows(self._normalize(mains, self.mmax))
+        pred = self.model.predict(X[..., np.newaxis], batch_size=128)
 
-        predictions = self.model.predict(X, batch_size=128)
-        predictions = self._denormalize(predictions.flatten(), self.mmax)
+        # Promedio de las predicciones solapadas: la ventana i cubre i..i+W-1
+        total = np.zeros(max(n, w), dtype='float64')
+        cuenta = np.zeros(max(n, w), dtype='float64')
+        k = len(pred)
+        for j in range(w):
+            total[j:j + k] += pred[:, j]
+            cuenta[j:j + k] += 1
+        promedio = (total / cuenta)[:n]
 
-        return pd.DataFrame({0: predictions}, index=index)
+        predictions = self._denormalize(promedio, self.mmax)
+        return pd.DataFrame({0: predictions}, index=mains.index)
 
     def disaggregate(self, mains, output_datastore, meter_metadata, **load_kwargs):
         load_kwargs = self._pre_disaggregation_checks(load_kwargs)
@@ -105,7 +128,7 @@ class Seq2SeqDisaggregator(Disaggregator):
         data_is_available = False
 
         for chunk in mains.power_series(**load_kwargs):
-            if len(chunk) < 100:
+            if len(chunk) < self.MIN_CHUNK_LENGTH:
                 continue
             print("New sensible chunk: {}".format(len(chunk)))
 
@@ -136,7 +159,7 @@ class Seq2SeqDisaggregator(Disaggregator):
             )
 
     def import_model(self, filename):
-        self.model = load_model(filename)
+        self.model = load_model(filename, compile=False)
         with h5py.File(filename, 'r') as hf:
             self.mmax = np.array(hf.get('disaggregator-data').get('mmax'))[0]
             self.window_size = int(np.array(hf.get('disaggregator-data').get('window_size'))[0])
@@ -147,4 +170,3 @@ class Seq2SeqDisaggregator(Disaggregator):
             gr = hf.create_group('disaggregator-data')
             gr.create_dataset('mmax', data=[self.mmax])
             gr.create_dataset('window_size', data=[self.window_size])
-
