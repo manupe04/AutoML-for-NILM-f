@@ -74,7 +74,7 @@ ALGORITMOS = {
     'window gru':                      (window_gru,  NN + ['window_size']),
     'seq2seq':                         (seq2seq,     NN + ['window_size']),
     'seq2point':                       (seq2point,   NN + ['window_size']),
-    'treecnn':                         (treecnn,     NN + ['window_size']),
+    'treecnn':                         (treecnn,     NN + ['window_size', 'kernel_size']),
     'sgn':                             (sgn,         NN + ['window_size']),
     'long short-term memory':          (lstm,        NN),
     'decision tree':                   (decision_tree, ['criterion', 'min_samples_split']),
@@ -97,6 +97,7 @@ DEFAULTS = {
     'criterion': 'squared_error',
     'min_samples_split': 10,
     'n_estimators': 30,
+    'kernel_size': 7,  # TreeCNN: el del paper
 }
 # Ventana por defecto especifica de cada algoritmo (la de 99 es la de seq2point)
 DEFAULTS_POR_ALGORITMO = {
@@ -115,6 +116,7 @@ ESPACIO = {
     'criterion': hp.choice('criterion', ['squared_error', 'friedman_mse']),
     'min_samples_split': hp.choice('min_samples_split', [2, 10, 20, 50]),
     'n_estimators': hp.choice('n_estimators', [10, 30, 50, 100]),
+    'kernel_size': hp.choice('kernel_size', [7, 15, 31]),
 }
 ESPACIO_POR_ALGORITMO = {
     'window gru': {'window_size': hp.choice('window_size', [20, 50, 100])},

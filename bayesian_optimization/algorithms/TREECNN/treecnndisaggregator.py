@@ -5,13 +5,12 @@ import pandas as pd
 import h5py
 import tensorflow as tf
 from tensorflow.keras.models import Model, load_model
-from tensorflow.keras.layers import (Conv1D, Conv1DTranspose, BatchNormalization,
-                                     Input, ReLU)
+from tensorflow.keras.layers import Conv1D, Conv1DTranspose, Input
 from nilmtk.legacy.disaggregate import Disaggregator
 from algorithms.corte_temprano import fit_con_corte
 
 
-def _make_block(window_size, name):
+def _make_block(window_size, name, kernel_size=7):
     """Bloque convolucional encoder-decoder para un electrodomestico.
 
     Port a 1D del CustomCNN del repositorio oficial de los autores
@@ -20,22 +19,27 @@ def _make_block(window_size, name):
     pipeline de NILMTK entrega ventanas unidimensionales.
 
     Se mantiene la estructura del original: dos convoluciones que comprimen
-    y dos transpuestas que reconstruyen, con BatchNorm entre medio. La salida
-    tiene la misma longitud que la entrada (seq2seq, no seq2point).
+    y dos transpuestas que reconstruyen. La salida tiene la misma longitud que
+    la entrada (seq2seq, no seq2point).
+
+    Sin BatchNorm (el original la tiene entre capas): con la normalizacion de
+    AMPR (dividir por el maximo del agregado de la casa de train) las
+    estadisticas que BatchNorm acumula en train no sirven para otra casa, y en
+    inferencia el modelo predecia casi cero. Heladera UK-DALE, 30 dias de
+    train (b1), val b5, test b2, 20 epocas: con BatchNorm MAE test 42,0 W y
+    SAE 0,46 (dejaba de mejorar en la 1ra epoca); con momentum 0,9, 111 W;
+    sin BatchNorm, 28,6 W y SAE 0,11. La ReLU pasa a las capas intermedias.
+
+    `kernel_size` es el de la primera convolucion y la ultima transpuesta
+    (7 en el original). A 60 s, 7 muestras son 7 minutos de contexto, poco
+    para un ciclo de heladera: la fase B lo optimiza (7, 15, 31).
     """
     inp = Input(shape=(window_size, 1), name=name + "_in")
 
-    x = Conv1D(16, 7, padding="same", name=name + "_conv1")(inp)
-    x = ReLU(name=name + "_act1")(x)
-    x = BatchNormalization(name=name + "_bn1")(x)
-
-    x = Conv1D(32, 2, strides=2, padding="same", name=name + "_conv2")(x)
-    x = BatchNormalization(name=name + "_bn2")(x)
-
-    x = Conv1DTranspose(16, 2, strides=2, padding="same", name=name + "_deconv1")(x)
-    x = BatchNormalization(name=name + "_bn3")(x)
-
-    out = Conv1DTranspose(1, 7, padding="same", name=name + "_deconv2")(x)
+    x = Conv1D(16, kernel_size, padding="same", activation="relu", name=name + "_conv1")(inp)
+    x = Conv1D(32, 2, strides=2, padding="same", activation="relu", name=name + "_conv2")(x)
+    x = Conv1DTranspose(16, 2, strides=2, padding="same", activation="relu", name=name + "_deconv1")(x)
+    out = Conv1DTranspose(1, kernel_size, padding="same", name=name + "_deconv2")(x)
 
     return Model(inp, out, name=name)
 
@@ -60,15 +64,28 @@ class TreeCNNCascade(tf.keras.Model):
     no esta disponible.
     """
 
-    def __init__(self, window_size, appliance_order, teacher_forcing_prob=0.5, **kwargs):
+    def __init__(self, window_size, appliance_order, teacher_forcing_prob=0.5, kernel_size=7, **kwargs):
         super().__init__(**kwargs)
         self.window_size = window_size
+        self.kernel_size = kernel_size
         self.appliance_order = list(appliance_order)
         self.teacher_forcing_prob = teacher_forcing_prob
         self.blocks = [
-            _make_block(window_size, "block_" + str(i) + "_" + a.replace(" ", "_"))
+            _make_block(window_size, "block_" + str(i) + "_" + a.replace(" ", "_"), kernel_size)
             for i, a in enumerate(self.appliance_order)
         ]
+
+    def get_config(self):
+        # Keras 3 no puede serializar solo los argumentos del constructor de un
+        # Model subclaseado: sin esto export_model() falla (NotImplementedError).
+        config = super().get_config()
+        config.update({
+            "window_size": self.window_size,
+            "appliance_order": self.appliance_order,
+            "teacher_forcing_prob": self.teacher_forcing_prob,
+            "kernel_size": self.kernel_size,
+        })
+        return config
 
     def call(self, inputs, training=False):
         agg = inputs
@@ -129,7 +146,7 @@ class TreeCNNDisaggregator(Disaggregator):
     """
 
     def __init__(self, patience, optimizer, learning_rate, loss,
-                 window_size=128, appliance_order=None, teacher_forcing_prob=0.5):
+                 window_size=128, appliance_order=None, teacher_forcing_prob=0.5, kernel_size=7):
         self.MODEL_NAME = "TreeCNN"
         self.mmax = None
         self.patience = patience
@@ -143,6 +160,7 @@ class TreeCNNDisaggregator(Disaggregator):
         self.window_size = window_size
         self.appliance_order = appliance_order or ["target"]
         self.teacher_forcing_prob = teacher_forcing_prob
+        self.kernel_size = kernel_size
         self.target_index = 0
         self.stopped_epoch = 0
         self.model = self._create_model(self.optimizer, self.learning_rate, self.loss)
@@ -152,6 +170,7 @@ class TreeCNNDisaggregator(Disaggregator):
             window_size=self.window_size,
             appliance_order=self.appliance_order,
             teacher_forcing_prob=self.teacher_forcing_prob,
+            kernel_size=self.kernel_size,
         )
         model.build((None, self.window_size, 1))
         model.compile(optimizer=optimizer, loss=loss)
@@ -333,6 +352,8 @@ class TreeCNNDisaggregator(Disaggregator):
         with h5py.File(filename, 'r') as hf:
             self.mmax = np.array(hf.get('disaggregator-data').get('mmax'))[0]
             self.window_size = int(np.array(hf.get('disaggregator-data').get('window_size'))[0])
+            ks = hf.get('disaggregator-data').get('kernel_size')
+            self.kernel_size = int(np.array(ks)[0]) if ks is not None else 7
 
     def export_model(self, filename):
         self.model.save(filename)
@@ -340,3 +361,4 @@ class TreeCNNDisaggregator(Disaggregator):
             gr = hf.create_group('disaggregator-data')
             gr.create_dataset('mmax', data=[self.mmax])
             gr.create_dataset('window_size', data=[self.window_size])
+            gr.create_dataset('kernel_size', data=[self.kernel_size])
