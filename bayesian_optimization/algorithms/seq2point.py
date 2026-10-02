@@ -6,6 +6,7 @@ sys.path.append(os.path.abspath('./bayesian_optimization/'))
 from tensorflow.keras.optimizers import Adam, RMSprop, Nadam
 from nilmtk import DataSet, HDFDataStore
 from algorithms.SEQ2POINT.seq2pointdisaggregator import Seq2PointDisaggregator
+from algorithms.multi_casa import abrir_casas_extra
 from utils import metrics
 #from seq2pointdisaggregator import Seq2PointDisaggregator
 import argparse
@@ -15,7 +16,8 @@ import pandas as pd
 
 def seq2point(dataset_path, train_building, train_start, train_end, val_building, val_start, val_end,
               test_building, test_start, test_end, meter_key, sample_period, num_epochs, patience,
-              optimizer, learning_rate, loss, window_size):
+              optimizer, learning_rate, loss, window_size,
+            train_extra=None, normalizacion="pico", potencia_aparato=None):
 
     start = time.time()
 
@@ -45,7 +47,12 @@ def seq2point(dataset_path, train_building, train_start, train_end, val_building
                                    loss=loss,
                                    window_size=window_size)
 
-    model.train(train_mains, train_meter, epochs=num_epochs, sample_period=sample_period)
+    # train_extra: casas de train adicionales [(building, inicio, fin), ...]
+    model.configurar_normalizacion(normalizacion, potencia_aparato)
+    pares_extra, abiertos = abrir_casas_extra(dataset_path, train_extra, meter_key)
+    model.train_casas([(train_mains, train_meter)] + pares_extra, epochs=num_epochs, sample_period=sample_period)
+    for ds in abiertos:
+        ds.store.close()
     num_epochs = model.stopped_epoch if model.stopped_epoch != 0 else num_epochs
 
     val_disag_filename = 'disag-SEQ2POINT-val.h5'
@@ -71,6 +78,8 @@ def seq2point(dataset_path, train_building, train_start, train_end, val_building
         'mean_squared_error': metrics.mean_square_error(res_elec_val[meter_key], val_elec[meter_key]),
         'relative_error_in_total_energy': metrics.relative_error_total_energy(res_elec_val[meter_key], val_elec[meter_key]),
         'sae': metrics.sae(res_elec_val[meter_key], val_elec[meter_key]),
+        'r2': metrics.r2(res_elec_val[meter_key], val_elec[meter_key]),
+        'pearson': metrics.pearson(res_elec_val[meter_key], val_elec[meter_key]),
         'nad': metrics.nad(res_elec_val[meter_key], val_elec[meter_key]),
         'disaggregation_accuracy': metrics.disaggregation_accuracy(res_elec_val[meter_key], val_elec[meter_key])
     }
@@ -88,6 +97,8 @@ def seq2point(dataset_path, train_building, train_start, train_end, val_building
         'mean_squared_error': metrics.mean_square_error(res_elec[meter_key], test_elec[meter_key]),
         'relative_error_in_total_energy': metrics.relative_error_total_energy(res_elec[meter_key], test_elec[meter_key]),
         'sae': metrics.sae(res_elec[meter_key], test_elec[meter_key]),
+        'r2': metrics.r2(res_elec[meter_key], test_elec[meter_key]),
+        'pearson': metrics.pearson(res_elec[meter_key], test_elec[meter_key]),
         'nad': metrics.nad(res_elec[meter_key], test_elec[meter_key]),
         'disaggregation_accuracy': metrics.disaggregation_accuracy(res_elec[meter_key], test_elec[meter_key])
     }

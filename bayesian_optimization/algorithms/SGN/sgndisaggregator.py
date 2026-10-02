@@ -6,10 +6,10 @@ import h5py
 from tensorflow.keras.models import Model, load_model
 from tensorflow.keras.layers import Conv1D, Dense, Flatten, Input, Multiply
 from nilmtk.legacy.disaggregate import Disaggregator
-from algorithms.corte_temprano import fit_con_corte
+from algorithms.multi_casa import EntrenamientoMultiCasa
 
 
-class SGNDisaggregator(Disaggregator):
+class SGNDisaggregator(EntrenamientoMultiCasa, Disaggregator):
     """Subtask Gated Network (Shin et al., 2019).
 
     Dos subredes paralelas sobre la misma ventana de la senal agregada:
@@ -86,46 +86,18 @@ class SGNDisaggregator(Disaggregator):
             idx.append(series.index[i])
         return np.array(X).reshape(-1, self.window_size, 1), pd.Index(idx)
 
-    def train(self, mains, meter, epochs=1, batch_size=128, **load_kwargs):
-        main_series = mains.power_series(**load_kwargs)
-        meter_series = meter.power_series(**load_kwargs)
-
-        run = True
-        mainchunk = next(main_series)
-        meterchunk = next(meter_series)
-        if self.mmax is None:
-            self.mmax = mainchunk.max()
-
-        while run:
-            mainchunk = self._normalize(mainchunk, self.mmax)
-            meterchunk = self._normalize(meterchunk, self.mmax)
-            self.train_on_chunk(mainchunk, meterchunk, epochs, batch_size)
-            try:
-                mainchunk = next(main_series)
-                meterchunk = next(meter_series)
-            except:
-                run = False
-
-    def train_on_chunk(self, mainchunk, meterchunk, epochs, batch_size):
-        mainchunk.fillna(0, inplace=True)
-        meterchunk.fillna(0, inplace=True)
-
-        ix = mainchunk.index.intersection(meterchunk.index)
-        mainchunk = mainchunk[ix]
-        meterchunk = meterchunk[ix]
-
-        X, idx = self._create_windows(mainchunk)
-        Y = np.array(meterchunk)
-
-        self.stopped_epoch = max(self.stopped_epoch, fit_con_corte(self.model, X, Y, epochs, batch_size, self.patience))
+    def _ventanas_entrenamiento(self, mains, aparato):
+        # train() y train_casas() vienen de EntrenamientoMultiCasa
+        X, _ = self._create_windows(mains)
+        return X, np.asarray(aparato)
 
     def disaggregate_chunk(self, mains):
         mains.fillna(0, inplace=True)
-        normalized = self._normalize(mains, self.mmax)
+        normalized = self._nx(mains)
         X, index = self._create_windows(normalized)
 
         predictions = self.model.predict(X, batch_size=128)
-        predictions = self._denormalize(predictions.flatten(), self.mmax)
+        predictions = self._dy(predictions.flatten())
 
         return pd.DataFrame({0: predictions}, index=index)
 
@@ -179,6 +151,7 @@ class SGNDisaggregator(Disaggregator):
         with h5py.File(filename, 'r') as hf:
             self.mmax = np.array(hf.get('disaggregator-data').get('mmax'))[0]
             self.window_size = int(np.array(hf.get('disaggregator-data').get('window_size'))[0])
+            self._leer_normalizacion(hf.get('disaggregator-data'))
 
     def export_model(self, filename):
         self.model.save(filename)
@@ -186,3 +159,4 @@ class SGNDisaggregator(Disaggregator):
             gr = hf.create_group('disaggregator-data')
             gr.create_dataset('mmax', data=[self.mmax])
             gr.create_dataset('window_size', data=[self.window_size])
+            self._guardar_normalizacion(gr)

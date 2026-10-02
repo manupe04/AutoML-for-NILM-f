@@ -8,6 +8,7 @@ from tensorflow.keras.models import Model, load_model
 from tensorflow.keras.layers import Conv1D, Conv1DTranspose, Input
 from nilmtk.legacy.disaggregate import Disaggregator
 from algorithms.corte_temprano import fit_con_corte
+from algorithms.multi_casa import EntrenamientoMultiCasa
 
 
 def _make_block(window_size, name, kernel_size=7):
@@ -119,7 +120,7 @@ class TreeCNNCascade(tf.keras.Model):
         return self.compute_metrics(x, y, out)
 
 
-class TreeCNNDisaggregator(Disaggregator):
+class TreeCNNDisaggregator(EntrenamientoMultiCasa, Disaggregator):
     """TreeCNN (Jia et al., 2019) adaptado a la interfaz de AutoML4NILM.
 
     IMPORTANTE - desajuste de interfaz:
@@ -144,6 +145,8 @@ class TreeCNNDisaggregator(Disaggregator):
     15 minutos o por hora), que es el regimen de medicion disponible en las
     cooperativas electricas.
     """
+
+    BATCH_SIZE = 64
 
     def __init__(self, patience, optimizer, learning_rate, loss,
                  window_size=128, appliance_order=None, teacher_forcing_prob=0.5, kernel_size=7):
@@ -253,42 +256,16 @@ class TreeCNNDisaggregator(Disaggregator):
     # ------------------------------------------------------------------
     # Camino compatible con AutoML4NILM: un solo electrodomestico
     # ------------------------------------------------------------------
-    def train(self, mains, meter, epochs=1, batch_size=64, **load_kwargs):
-        main_series = mains.power_series(**load_kwargs)
-        meter_series = meter.power_series(**load_kwargs)
-
-        run = True
-        mainchunk = next(main_series)
-        meterchunk = next(meter_series)
-        if self.mmax is None:
-            self.mmax = mainchunk.max()
-
-        while run:
-            mainchunk = self._normalize(mainchunk, self.mmax)
-            meterchunk = self._normalize(meterchunk, self.mmax)
-            self.train_on_chunk(mainchunk, meterchunk, epochs, batch_size)
-            try:
-                mainchunk = next(main_series)
-                meterchunk = next(meter_series)
-            except:
-                run = False
-
-    def train_on_chunk(self, mainchunk, meterchunk, epochs, batch_size):
-        mainchunk = mainchunk.fillna(0)
-        meterchunk = meterchunk.fillna(0)
-
-        ix = mainchunk.index.intersection(meterchunk.index)
-        mainchunk = mainchunk[ix]
-        meterchunk = meterchunk[ix]
-
-        X, _ = self._create_windows(mainchunk)
-        Y, _ = self._create_windows(meterchunk)
-
-        self.stopped_epoch = max(self.stopped_epoch, fit_con_corte(self.model, X, Y, epochs, batch_size, self.patience))
+    def _ventanas_entrenamiento(self, mains, aparato):
+        # train() y train_casas() (un solo aparato) vienen de
+        # EntrenamientoMultiCasa; train_multi() es la cascada de varios aparatos.
+        X, _ = self._create_windows(mains)
+        Y, _ = self._create_windows(aparato)
+        return X, Y
 
     def disaggregate_chunk(self, mains):
         mains = mains.fillna(0)
-        normalized = self._normalize(mains, self.mmax)
+        normalized = self._nx(mains)
         X, index = self._create_windows(normalized)
 
         preds = self.model.predict(X, batch_size=64)
@@ -296,7 +273,7 @@ class TreeCNNDisaggregator(Disaggregator):
         # la serie concatenando las ventanas.
         target = preds[..., self.target_index].reshape(-1)
         target = target[:len(index)]
-        target = self._denormalize(target, self.mmax)
+        target = self._dy(target)
 
         return pd.DataFrame({0: target}, index=index)
 
@@ -352,6 +329,7 @@ class TreeCNNDisaggregator(Disaggregator):
         with h5py.File(filename, 'r') as hf:
             self.mmax = np.array(hf.get('disaggregator-data').get('mmax'))[0]
             self.window_size = int(np.array(hf.get('disaggregator-data').get('window_size'))[0])
+            self._leer_normalizacion(hf.get('disaggregator-data'))
             ks = hf.get('disaggregator-data').get('kernel_size')
             self.kernel_size = int(np.array(ks)[0]) if ks is not None else 7
 
@@ -362,3 +340,4 @@ class TreeCNNDisaggregator(Disaggregator):
             gr.create_dataset('mmax', data=[self.mmax])
             gr.create_dataset('window_size', data=[self.window_size])
             gr.create_dataset('kernel_size', data=[self.kernel_size])
+            self._guardar_normalizacion(gr)

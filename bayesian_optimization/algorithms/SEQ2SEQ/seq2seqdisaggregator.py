@@ -20,10 +20,10 @@ from numpy.lib.stride_tricks import sliding_window_view
 from tensorflow.keras.models import Sequential, load_model
 from tensorflow.keras.layers import Input, Conv1D, Dense, Flatten
 from nilmtk.legacy.disaggregate import Disaggregator
-from algorithms.corte_temprano import fit_con_corte
+from algorithms.multi_casa import EntrenamientoMultiCasa
 
 
-class Seq2SeqDisaggregator(Disaggregator):
+class Seq2SeqDisaggregator(EntrenamientoMultiCasa, Disaggregator):
     def __init__(self, patience, optimizer, learning_rate, loss, window_size=99):
         self.MODEL_NAME = "Seq2Seq"
         self.mmax = None
@@ -68,41 +68,15 @@ class Seq2SeqDisaggregator(Disaggregator):
             values = np.pad(values, (0, self.window_size - len(values)))
         return sliding_window_view(values, self.window_size)
 
-    def train(self, mains, meter, epochs=1, batch_size=128, **load_kwargs):
-        main_series = mains.power_series(**load_kwargs)
-        meter_series = meter.power_series(**load_kwargs)
-
-        run = True
-        mainchunk = next(main_series)
-        meterchunk = next(meter_series)
-        if self.mmax is None:
-            self.mmax = mainchunk.max()
-
-        while run:
-            mainchunk = self._normalize(mainchunk, self.mmax)
-            meterchunk = self._normalize(meterchunk, self.mmax)
-            self.train_on_chunk(mainchunk, meterchunk, epochs, batch_size)
-            try:
-                mainchunk = next(main_series)
-                meterchunk = next(meter_series)
-            except StopIteration:
-                run = False
-
-    def train_on_chunk(self, mainchunk, meterchunk, epochs, batch_size):
-        mainchunk = mainchunk.fillna(0)
-        meterchunk = meterchunk.fillna(0)
-
-        ix = mainchunk.index.intersection(meterchunk.index)
-        X = self._windows(mainchunk[ix])[..., np.newaxis]
-        Y = self._windows(meterchunk[ix])
-
-        self.stopped_epoch = max(self.stopped_epoch, fit_con_corte(self.model, X, Y, epochs, batch_size, self.patience))
+    def _ventanas_entrenamiento(self, mains, aparato):
+        # train() y train_casas() vienen de EntrenamientoMultiCasa
+        return self._windows(mains)[..., np.newaxis], self._windows(aparato)
 
     def disaggregate_chunk(self, mains):
         mains = mains.fillna(0)
         n = len(mains)
         w = self.window_size
-        X = self._windows(self._normalize(mains, self.mmax))
+        X = self._windows(self._nx(mains))
         pred = self.model.predict(X[..., np.newaxis], batch_size=128)
 
         # Promedio de las predicciones solapadas: la ventana i cubre i..i+W-1
@@ -114,7 +88,7 @@ class Seq2SeqDisaggregator(Disaggregator):
             cuenta[j:j + k] += 1
         promedio = (total / cuenta)[:n]
 
-        predictions = self._denormalize(promedio, self.mmax)
+        predictions = self._dy(promedio)
         return pd.DataFrame({0: predictions}, index=mains.index)
 
     def disaggregate(self, mains, output_datastore, meter_metadata, **load_kwargs):
@@ -163,6 +137,7 @@ class Seq2SeqDisaggregator(Disaggregator):
         with h5py.File(filename, 'r') as hf:
             self.mmax = np.array(hf.get('disaggregator-data').get('mmax'))[0]
             self.window_size = int(np.array(hf.get('disaggregator-data').get('window_size'))[0])
+            self._leer_normalizacion(hf.get('disaggregator-data'))
 
     def export_model(self, filename):
         self.model.save(filename)
@@ -170,3 +145,4 @@ class Seq2SeqDisaggregator(Disaggregator):
             gr = hf.create_group('disaggregator-data')
             gr.create_dataset('mmax', data=[self.mmax])
             gr.create_dataset('window_size', data=[self.window_size])
+            self._guardar_normalizacion(gr)

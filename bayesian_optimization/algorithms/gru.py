@@ -86,6 +86,8 @@ def gru(dataset_path, train_building, train_start, train_end, val_building, val_
                                                                               val_elec[meter_key]),
         'nad': metrics.nad(res_elec_val[meter_key], val_elec[meter_key]),
         'sae': metrics.sae(res_elec_val[meter_key], val_elec[meter_key]),
+        'r2': metrics.r2(res_elec_val[meter_key], val_elec[meter_key]),
+        'pearson': metrics.pearson(res_elec_val[meter_key], val_elec[meter_key]),
         'disaggregation_accuracy': metrics.disaggregation_accuracy(res_elec_val[meter_key], val_elec[meter_key])
     }
 
@@ -105,6 +107,8 @@ def gru(dataset_path, train_building, train_start, train_end, val_building, val_
                                                                               test_elec[meter_key]),
         'nad': metrics.nad(res_elec[meter_key], test_elec[meter_key]),
         'sae': metrics.sae(res_elec[meter_key], test_elec[meter_key]),
+        'r2': metrics.r2(res_elec[meter_key], test_elec[meter_key]),
+        'pearson': metrics.pearson(res_elec[meter_key], test_elec[meter_key]),
         'disaggregation_accuracy': metrics.disaggregation_accuracy(res_elec[meter_key], test_elec[meter_key])
     }
 

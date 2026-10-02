@@ -79,6 +79,8 @@ def window_gru(dataset_path, train_building, train_start, train_end, val_buildin
         'relative_error_in_total_energy': metrics.relative_error_total_energy(res_elec_val[meter_key], val_elec[meter_key]),
         'nad': metrics.nad(res_elec_val[meter_key], val_elec[meter_key]),
         'sae': metrics.sae(res_elec_val[meter_key], val_elec[meter_key]),
+        'r2': metrics.r2(res_elec_val[meter_key], val_elec[meter_key]),
+        'pearson': metrics.pearson(res_elec_val[meter_key], val_elec[meter_key]),
         'disaggregation_accuracy': metrics.disaggregation_accuracy(res_elec_val[meter_key], val_elec[meter_key])
     }
 
@@ -97,6 +99,8 @@ def window_gru(dataset_path, train_building, train_start, train_end, val_buildin
         'relative_error_in_total_energy': metrics.relative_error_total_energy(res_elec[meter_key], test_elec[meter_key]),
         'nad': metrics.nad(res_elec[meter_key], test_elec[meter_key]),
         'sae': metrics.sae(res_elec[meter_key], test_elec[meter_key]),
+        'r2': metrics.r2(res_elec[meter_key], test_elec[meter_key]),
+        'pearson': metrics.pearson(res_elec[meter_key], test_elec[meter_key]),
         'disaggregation_accuracy': metrics.disaggregation_accuracy(res_elec[meter_key], test_elec[meter_key])
     }
 

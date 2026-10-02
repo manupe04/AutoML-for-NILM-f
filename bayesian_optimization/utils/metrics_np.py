@@ -23,6 +23,19 @@ def sae(output, target):
         return float('nan')  # compute_metrics convierte a float: None rompe
     return float(np.abs(np.sum(output) - sum_target) / sum_target)
 
+# Coeficiente de determinacion (misma definicion que utils/metrics.py:r2)
+def r2(output, target):
+    sst = np.sum((target - np.mean(target)) ** 2)
+    if sst == 0:
+        return float('nan')
+    return float(1 - np.sum((output - target) ** 2) / sst)
+
+# Correlacion de Pearson (misma definicion que utils/metrics.py:pearson)
+def pearson(output, target):
+    if np.std(output) == 0 or np.std(target) == 0:
+        return float('nan')
+    return float(np.corrcoef(output, target)[0, 1])
+
 # Lungu's Disaggregation Accuracy for Appliance
 def disaggregation_accuracy(prediction, test_data):
     test = test_data[0:len(prediction)]
@@ -44,6 +57,8 @@ METRICS = {
         relative_error_in_total_energy,
         nad,
         sae,
+        r2,
+        pearson,
         disaggregation_accuracy
     ]
 }

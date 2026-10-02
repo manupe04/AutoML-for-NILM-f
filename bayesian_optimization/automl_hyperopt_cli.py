@@ -124,6 +124,11 @@ ESPACIO_POR_ALGORITMO = {
 
 OPTIMIZADORES = {'adam': Adam, 'nadam': Nadam, 'rmsprop': RMSprop}
 
+# Algoritmos que aceptan varias casas de train y normalizacion fija
+# (algorithms/multi_casa.py). Potencia tipica del aparato para la fija (W).
+MULTI_CASA = {'seq2point', 'sgn', 'treecnn', 'seq2seq'}
+POTENCIA_APARATO = {'fridge freezer': 300.0, 'washing machine': 2500.0, 'microwave': 3000.0}
+
 # Metricas a maximizar (hyperopt minimiza: se invierten)
 A_MAXIMIZAR = {'precision_score', 'recall_score', 'accuracy_score', 'f1_score', 'disaggregation_accuracy'}
 
@@ -166,6 +171,9 @@ def entrenar(algoritmo, hparams, cfg):
         meter_key=cfg.appliance,
         sample_period=cfg.sampling_rate,
     )
+    if algoritmo in MULTI_CASA:
+        kwargs.update(train_extra=cfg.train_extra, normalizacion=cfg.normalizacion,
+                      potencia_aparato=POTENCIA_APARATO.get(cfg.appliance))
     for k, v in hparams.items():
         if k == 'optimizer':
             # Instancia con el learning rate: pasando el nombre ('adam'),
@@ -185,6 +193,8 @@ def entrenar(algoritmo, hparams, cfg):
         'appliance': cfg.appliance,
         'sampling_rate': cfg.sampling_rate,
         'train': [cfg.train_building, cfg.train_start, cfg.train_end],
+        'train_extra': [list(t) for t in cfg.train_extra],
+        'normalizacion': cfg.normalizacion,
         'val': [cfg.val_building, cfg.val_start, cfg.val_end],
         'test': [cfg.test_building, cfg.test_start, cfg.test_end],
         'max_epochs': cfg.epochs if algoritmo in CON_EPOCAS else None,
@@ -296,6 +306,10 @@ def parse_args(argv=None):
     p.add_argument('--seed', type=int, default=42,
                    help='Semilla de Python, numpy y TF (y de hyperopt). Default 42')
     p.add_argument('--salida', default='results/trials.jsonl', help='JSONL donde se agrega cada corrida')
+    p.add_argument('--train_extra', nargs='*', default=[], metavar='CASA:INICIO:FIN',
+                   help=f'Casas de train adicionales (solo {sorted(MULTI_CASA)}), p. ej. 2:2014-05-01:2014-06-30')
+    p.add_argument('--normalizacion', choices=['pico', 'fija'], default='pico',
+                   help='pico: / maximo del agregado (original); fija: agregado estandarizado y aparato / potencia tipica')
     cfg = p.parse_args(argv)
 
     if cfg.algoritmos == ['todos']:
@@ -303,6 +317,16 @@ def parse_args(argv=None):
     desconocidos = [a for a in cfg.algoritmos if a not in ALGORITMOS]
     if desconocidos:
         p.error(f"algoritmos desconocidos: {desconocidos}. Validos: {list(ALGORITMOS)}")
+    try:
+        cfg.train_extra = [(int(b), ini, fin) for b, ini, fin in (t.split(':') for t in cfg.train_extra)]
+    except ValueError:
+        p.error("--train_extra: usar CASA:INICIO:FIN, p. ej. 2:2014-05-01:2014-06-30")
+    if cfg.train_extra or cfg.normalizacion != 'pico':
+        otros = [a for a in cfg.algoritmos if a not in MULTI_CASA]
+        if otros:
+            p.error(f"--train_extra / --normalizacion fija solo para {sorted(MULTI_CASA)}; no para {otros}")
+        if cfg.normalizacion == 'fija' and cfg.appliance not in POTENCIA_APARATO:
+            p.error(f"sin potencia tipica para '{cfg.appliance}' (POTENCIA_APARATO)")
     if cfg.test_building == cfg.train_building:
         logger.warning("La casa de test es la de train: no mide generalizacion entre casas")
     os.makedirs(os.path.dirname(os.path.abspath(cfg.salida)), exist_ok=True)
