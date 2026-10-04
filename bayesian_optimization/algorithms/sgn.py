@@ -13,7 +13,8 @@ import pandas as pd
 def sgn(dataset_path, train_building, train_start, train_end, val_building, val_start, val_end,
         test_building, test_start, test_end, meter_key, sample_period, num_epochs, patience,
         optimizer, learning_rate, loss, window_size,
-            train_extra=None, normalizacion="pico", potencia_aparato=None):
+            train_extra=None, normalizacion="pico", potencia_aparato=None,
+            exportar=None):
 
     start = time.time()
 
@@ -49,6 +50,9 @@ def sgn(dataset_path, train_building, train_start, train_end, val_building, val_
     model.train_casas([(train_mains, train_meter)] + pares_extra, epochs=num_epochs, sample_period=sample_period)
     for ds in abiertos:
         ds.store.close()
+    if exportar:
+        # Modelo entrenado (con su normalizacion) para evaluar_teca.py / publicar
+        model.export_model(exportar)
     num_epochs = model.stopped_epoch if model.stopped_epoch != 0 else num_epochs
 
     val_disag_filename = 'disag-SGN-val.h5'

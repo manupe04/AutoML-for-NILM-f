@@ -13,7 +13,8 @@ import pandas as pd
 def treecnn(dataset_path, train_building, train_start, train_end, val_building, val_start, val_end,
             test_building, test_start, test_end, meter_key, sample_period, num_epochs, patience,
             optimizer, learning_rate, loss, window_size, kernel_size=7,
-            train_extra=None, normalizacion="pico", potencia_aparato=None):
+            train_extra=None, normalizacion="pico", potencia_aparato=None,
+            exportar=None):
     """Wrapper que integra TreeCNN a AutoML4NILM, con la misma firma que sgn().
 
     Usa el camino train()/disaggregate() de TreeCNNDisaggregator (un solo
@@ -58,6 +59,9 @@ def treecnn(dataset_path, train_building, train_start, train_end, val_building, 
     model.train_casas([(train_mains, train_meter)] + pares_extra, epochs=num_epochs, sample_period=sample_period)
     for ds in abiertos:
         ds.store.close()
+    if exportar:
+        # Modelo entrenado (con su normalizacion) para evaluar_teca.py / publicar
+        model.export_model(exportar)
     num_epochs = model.stopped_epoch if model.stopped_epoch != 0 else num_epochs
 
     val_disag_filename = 'disag-TreeCNN-val.h5'

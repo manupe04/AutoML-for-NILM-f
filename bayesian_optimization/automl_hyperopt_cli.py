@@ -26,6 +26,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import argparse
 import datetime
 import json
+import math
 import logging
 import time
 import traceback
@@ -129,6 +130,16 @@ OPTIMIZADORES = {'adam': Adam, 'nadam': Nadam, 'rmsprop': RMSprop}
 MULTI_CASA = {'seq2point', 'sgn', 'treecnn', 'seq2seq'}
 POTENCIA_APARATO = {'fridge freezer': 300.0, 'washing machine': 2500.0, 'microwave': 3000.0}
 
+# Puntaje combinado de validacion (menor es mejor): NAD^2 (MAE relativo al
+# consumo medio del aparato) + SAE (energia) + (1 - F1) (deteccion). Con el
+# MAE solo, en aparatos de uso esporadico (lavarropas, microondas) gana
+# predecir siempre cero; ese predictor suma ~1 en cada termino y queda ultimo.
+def puntaje_combinado(m):
+    def num(x, defecto):
+        return defecto if x is None or (isinstance(x, float) and math.isnan(x)) else float(x)
+    return num(m.get('nad'), 1.0) ** 2 + num(m.get('sae'), 1.0) + (1 - num(m.get('f1_score'), 0.0))
+
+
 # Metricas a maximizar (hyperopt minimiza: se invierten)
 A_MAXIMIZAR = {'precision_score', 'recall_score', 'accuracy_score', 'f1_score', 'disaggregation_accuracy'}
 
@@ -173,7 +184,7 @@ def entrenar(algoritmo, hparams, cfg):
     )
     if algoritmo in MULTI_CASA:
         kwargs.update(train_extra=cfg.train_extra, normalizacion=cfg.normalizacion,
-                      potencia_aparato=POTENCIA_APARATO.get(cfg.appliance))
+                      potencia_aparato=POTENCIA_APARATO.get(cfg.appliance), exportar=cfg.exportar)
     for k, v in hparams.items():
         if k == 'optimizer':
             # Instancia con el learning rate: pasando el nombre ('adam'),
@@ -225,7 +236,13 @@ def entrenar(algoritmo, hparams, cfg):
     return registro
 
 
+def valor_metrica(m, metrica):
+    return puntaje_combinado(m) if metrica == 'combinado' else m[metrica]
+
+
 def valor_a_minimizar(registro, metrica):
+    if metrica == 'combinado':
+        return puntaje_combinado(registro['val_metrics'])
     v = float(registro['val_metrics'][metrica])
     return -v if metrica in A_MAXIMIZAR else v
 
@@ -241,12 +258,12 @@ def hparams_por_defecto(algoritmo):
 
 def barrido(cfg):
     for algoritmo in cfg.algoritmos:
-        hparams = hparams_por_defecto(algoritmo)
+        hparams = {**hparams_por_defecto(algoritmo), **cfg.hparams}
         logger.info(f"[barrido] {algoritmo} {hparams}")
         r = entrenar(algoritmo, hparams, cfg)
         if r['status'] == STATUS_OK:
-            logger.info(f"[barrido] {algoritmo}: {cfg.metrica} val={r['val_metrics'][cfg.metrica]:.4f} "
-                        f"test={r['test_metrics'][cfg.metrica]:.4f} ({r['time_taken']} s)")
+            logger.info(f"[barrido] {algoritmo}: {cfg.metrica} val={valor_metrica(r['val_metrics'], cfg.metrica):.4f} "
+                        f"test={valor_metrica(r['test_metrics'], cfg.metrica):.4f} ({r['time_taken']} s)")
         else:
             logger.error(f"[barrido] {algoritmo} FALLO: {r['error']}")
 
@@ -268,7 +285,7 @@ def optimizar(cfg):
             r = entrenar(algoritmo, hparams, cfg)
             if r['status'] != STATUS_OK:
                 return {'status': STATUS_FAIL}
-            logger.info(f"[optimizar] {algoritmo} {hparams}: {cfg.metrica} val={r['val_metrics'][cfg.metrica]:.4f}")
+            logger.info(f"[optimizar] {algoritmo} {hparams}: {cfg.metrica} val={valor_metrica(r['val_metrics'], cfg.metrica):.4f}")
             return {'status': STATUS_OK, 'loss': valor_a_minimizar(r, cfg.metrica)}
 
         trials = Trials()
@@ -302,12 +319,16 @@ def parse_args(argv=None):
                    help='Nombres del CLI (entre comillas si tienen espacios) o "todos"')
     p.add_argument('--modo', choices=['barrido', 'optimizar'], default='barrido')
     p.add_argument('--max_evals', type=int, default=10, help='Evaluaciones por algoritmo (modo optimizar)')
-    p.add_argument('--metrica', default='mean_absolute_error', help='Metrica de validacion a optimizar')
+    p.add_argument('--metrica', default='combinado',
+                   help="Metrica de validacion a optimizar: 'combinado' (NAD^2 + SAE + 1 - F1, default) o una de las metricas")
     p.add_argument('--seed', type=int, default=42,
                    help='Semilla de Python, numpy y TF (y de hyperopt). Default 42')
     p.add_argument('--salida', default='results/trials.jsonl', help='JSONL donde se agrega cada corrida')
     p.add_argument('--train_extra', nargs='*', default=[], metavar='CASA:INICIO:FIN',
                    help=f'Casas de train adicionales (solo {sorted(MULTI_CASA)}), p. ej. 2:2014-05-01:2014-06-30')
+    p.add_argument('--hparams', type=json.loads, default={},
+                   help='JSON con hiperparametros fijos para el modo barrido (pisan los por defecto)')
+    p.add_argument('--exportar', help=f'Ruta .h5 donde guardar el modelo entrenado (solo {sorted(MULTI_CASA)}, un algoritmo, modo barrido)')
     p.add_argument('--normalizacion', choices=['pico', 'fija'], default='pico',
                    help='pico: / maximo del agregado (original); fija: agregado estandarizado y aparato / potencia tipica')
     cfg = p.parse_args(argv)
@@ -327,6 +348,8 @@ def parse_args(argv=None):
             p.error(f"--train_extra / --normalizacion fija solo para {sorted(MULTI_CASA)}; no para {otros}")
         if cfg.normalizacion == 'fija' and cfg.appliance not in POTENCIA_APARATO:
             p.error(f"sin potencia tipica para '{cfg.appliance}' (POTENCIA_APARATO)")
+    if cfg.exportar and (cfg.modo != 'barrido' or len(cfg.algoritmos) != 1 or cfg.algoritmos[0] not in MULTI_CASA):
+        p.error(f"--exportar: un solo algoritmo de {sorted(MULTI_CASA)} en modo barrido")
     if cfg.test_building == cfg.train_building:
         logger.warning("La casa de test es la de train: no mide generalizacion entre casas")
     os.makedirs(os.path.dirname(os.path.abspath(cfg.salida)), exist_ok=True)
